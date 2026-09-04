@@ -1,0 +1,35 @@
+# Core NLP & ML
+transformers
+torch
+sentencepiece
+scikit-learn
+pandas
+numpy
+
+# spaCy + English model
+spacy
+en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1.tar.gz
+
+# FastAPI backend
+fastapi
+uvicorn[standard]
+
+# Email handling
+imaplib2
+email-validator
+
+# Environment variables
+python-dotenv
+
+# Scheduling (optional)
+APScheduler
+
+# Utilities
+requests
+beautifulsoup4
+
+# Database (SQLite helpers)
+sqlalchemy
+
+# Optional: Streamlit dashboard
+streamlit
