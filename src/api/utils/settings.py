@@ -1,11 +1,13 @@
 from pydantic_settings import BaseSettings
 
-class Settings(BaseSettings):
-    IMAP_HOST: str
-    EMAIL_USER: str
-    EMAIL_PASS: str
+class EmailSettings(BaseSettings):
+    host: str
+    user: str
+    password: str
 
-    class Config:
-        env_file = ".env"
+    model_config = {
+        "env_prefix": "IMAP_",
+        "env_file": ".env"
+    }
 
-settings = Settings()
+email_settings = EmailSettings()
