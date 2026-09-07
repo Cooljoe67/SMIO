@@ -1,26 +1,19 @@
-import imaplib
-from .settings import settings
+from imap_tools import MailBox
+from .settings import email_settings
 
 def fetch_inbox():
-    host = settings.IMAP_HOST
-    user = settings.EMAIL_USER
-    password = settings.EMAIL_PASS
+    with MailBox(email_settings.host).login(email_settings.user, email_settings.password) as mailbox:
+        messages = mailbox.fetch()
+        emails = []
 
-    mail = imaplib.IMAP4_SSL(host)
-    mail.login(user, password)
-    mail.select("INBOX")
+        for msg in messages:
+            emails.append({
+                "uid": msg.uid,
+                "subject": msg.subject,
+                "from": msg.from_,
+                "date": msg.date_str,
+                "text": msg.text,
+                "html": msg.html,
+            })
 
-    status, messages = mail.search(None, "ALL")
-    email_ids = messages[0].split()
-
-    results = []
-
-    for eid in email_ids[-10:]:  # fetch last 10 emails
-        status, msg_data = mail.fetch(eid, "(RFC822)")
-        raw_email = msg_data[0][1].decode("utf-8", errors="ignore")
-        results.append({"id": eid.decode(), "raw": raw_email})
-
-    mail.close()
-    mail.logout()
-
-    return results
+        return emails
