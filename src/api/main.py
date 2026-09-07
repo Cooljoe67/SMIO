@@ -1,6 +1,12 @@
 from fastapi import FastAPI
 from .routers import inbox, delivery, summary, model, imap
 
+from src.db.database import engine
+from src.db.models import Base
+
+Base.metadata.create_all(bind=engine)
+
+
 app = FastAPI(
     title="SMIO API",
     description="Smart Mail Inbox Organizer – Async IMAP Enabled",
