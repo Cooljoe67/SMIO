@@ -1,8 +1,9 @@
 # scripts/train_bert_classifier.py
+
 from transformers import BertTokenizerFast, BertForSequenceClassification, Trainer, TrainingArguments
 from datasets import Dataset
 from src.ai.labels import LABEL2ID, ID2LABEL
-from export_training_data import load_training_data
+from scripts.export_training_data import load_training_data
 
 def prepare_dataset():
     texts, labels = load_training_data()
@@ -10,11 +11,18 @@ def prepare_dataset():
     return Dataset.from_dict({"text": texts, "label": label_ids})
 
 def tokenize(batch):
-    return tokenizer(batch["text"], padding="max_length", truncation=True, max_length=256)
+    return tokenizer(
+        batch["text"],
+        padding="max_length",
+        truncation=True,
+        max_length=256
+    )
 
 if __name__ == "__main__":
     model_name = "bert-base-uncased"
+
     tokenizer = BertTokenizerFast.from_pretrained(model_name)
+
     model = BertForSequenceClassification.from_pretrained(
         model_name,
         num_labels=len(LABEL2ID),
@@ -24,6 +32,7 @@ if __name__ == "__main__":
 
     dataset = prepare_dataset()
     dataset = dataset.train_test_split(test_size=0.1)
+
     train_ds = dataset["train"]
     eval_ds = dataset["test"]
 
@@ -52,5 +61,6 @@ if __name__ == "__main__":
     )
 
     trainer.train()
+
     trainer.save_model("./models/bert-smio")
     tokenizer.save_pretrained("./models/bert-smio")
