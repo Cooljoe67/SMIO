@@ -9,7 +9,7 @@ Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
     title="SMIO API",
-    description="Smart Mail Inbox Organizer – Async IMAP Enabled",
+    description="Smart Mail Inbox Organizer",
     version="0.4.0"
 )
 
@@ -22,4 +22,4 @@ app.include_router(classifier.router)
 
 @app.get("/")
 def root():
-    return {"message": "SMIO API running with async IMAP"}
+    return {"message": "SMIO API running"}

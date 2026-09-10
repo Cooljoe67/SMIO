@@ -18,9 +18,13 @@ class Email(Base):
     text = Column(Text)
     html = Column(Text)
 
+
     # AI fields
     classification = Column(String, nullable=True)
     confidence = Column(String, nullable=True)
     embedding = Column(Text, nullable=True)
 
     processed = Column(Boolean, default=False)
+
+    true_label = Column(String, nullable=True)
+
