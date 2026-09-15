@@ -4,14 +4,9 @@ from imap_tools import MailBox
 from src.db.database import SessionLocal
 from src.db.models import Email
 from src.api.utils.settings import email_settings
+from src.api.utils.folder_rules import FOLDER_TO_CLASSIFICATION
 
-CATEGORY_FOLDERS = {
-    "INBOX/delivery": "delivery",
-    "INBOX/social": "social",
-    "INBOX/other": "other",
-    "INBOX/commercial": "commercial",
-    "INBOX/tech": "tech",
-}
+CATEGORY_FOLDERS = FOLDER_TO_CLASSIFICATION
 
 def import_training_data():
     db = SessionLocal()
