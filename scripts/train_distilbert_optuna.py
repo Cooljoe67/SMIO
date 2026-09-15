@@ -4,7 +4,7 @@ import torch
 import optuna
 import csv
 
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import train_test_split
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import (
     precision_recall_fscore_support,
@@ -31,8 +31,16 @@ MODEL_NAME = "distilbert-base-uncased"
 BASE_OUTPUT_DIR = "./models/distilbert_optuna"
 DEPLOY_DIR = "./models/distilbert_deployed"
 
-STUDY_NAME = "distilbert_email_classification"
-STUDY_STORAGE = "sqlite:///optuna_distilbert.db"  # <-- Persistente Optuna-Study
+# Fixed training configuration for this study.
+STUDY_NAME = "distilbert_email_classification_fixed_256"
+STUDY_STORAGE = "sqlite:///optuna_distilbert.db"   # persistent Optuna DB
+NUM_SPLITS = 1
+NUM_TRAIN_EPOCHS = 4
+MAX_LENGTH = 256
+BATCH_SIZE = 16
+WARMUP_RATIO = 0.15
+N_TRIALS = 5
+TARGET_F1 = 0.89
 
 
 # ---------- Dataset ----------
@@ -61,24 +69,15 @@ class EmailDataset(Dataset):
 
 # ---------- Weighted DistilBERT ----------
 
-class WeightedDistilBertForSequenceClassification(
-    DistilBertForSequenceClassification
-):
+class WeightedDistilBertForSequenceClassification(DistilBertForSequenceClassification):
     def __init__(self, config, class_weights=None):
         super().__init__(config)
         self.class_weights = (
             torch.tensor(class_weights, dtype=torch.float)
-            if class_weights is not None
-            else None
+            if class_weights is not None else None
         )
 
-    def forward(
-        self,
-        input_ids=None,
-        attention_mask=None,
-        labels=None,
-        **kwargs,
-    ):
+    def forward(self, input_ids=None, attention_mask=None, labels=None, **kwargs):
         outputs = super().forward(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -88,16 +87,15 @@ class WeightedDistilBertForSequenceClassification(
 
         loss = None
         if labels is not None:
+            labels = labels.to(
+                device=outputs.logits.device,
+                dtype=torch.long,
+            )
             loss_fct = torch.nn.CrossEntropyLoss(
-                weight=(
-                    self.class_weights.to(outputs.logits.device)
-                    if self.class_weights is not None
-                    else None
-                )
+                weight=(self.class_weights.to(outputs.logits.device)
+                        if self.class_weights is not None else None)
             )
-            loss = loss_fct(
-                outputs.logits.view(-1, self.num_labels), labels.view(-1)
-            )
+            loss = loss_fct(outputs.logits.view(-1, self.num_labels), labels.view(-1))
 
         return SequenceClassifierOutput(
             loss=loss,
@@ -113,9 +111,7 @@ def load_data():
     db = SessionLocal()
     try:
         emails = db.query(Email).filter(Email.true_label != None).all()
-
-        texts = []
-        labels = []
+        texts, labels = [], []
 
         for email in emails:
             if email.true_label in LABEL2ID:
@@ -138,12 +134,7 @@ def compute_metrics(eval_pred):
     )
     acc = accuracy_score(labels_eval, preds)
 
-    return {
-        "accuracy": acc,
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
-    }
+    return {"accuracy": acc, "precision": precision, "recall": recall, "f1": f1}
 
 
 def confusion_matrix_per_class(labels_true, labels_pred):
@@ -155,32 +146,30 @@ def confusion_matrix_per_class(labels_true, labels_pred):
 def objective(trial, texts, labels, tokenizer, class_weights):
 
     num_labels = len(LABEL2ID)
+    learning_rate = trial.suggest_float("learning_rate", 2e-5, 4e-5, log=True)
 
-    # Hyperparameter Search Space (leicht gestrafft)
-    lr = trial.suggest_float("learning_rate", 1e-5, 5e-5, log=True)
-    bs = trial.suggest_categorical("batch_size", [16, 32])  # größer für Speed
-    ml = trial.suggest_categorical("max_length", [128, 256])
-    wr = trial.suggest_float("warmup_ratio", 0.05, 0.2)
-
-    # 3-Fold statt 5-Fold
-    skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
-
+    train_idx, val_idx = train_test_split(
+        np.arange(len(texts)),
+        test_size=0.2,
+        stratify=labels,
+        random_state=42,
+    )
     fold_f1_scores = []
 
-    for fold, (train_idx, val_idx) in enumerate(skf.split(texts, labels)):
+    for fold, (train_idx, val_idx) in enumerate([(train_idx, val_idx)]):
 
         train_dataset = EmailDataset(
             [texts[i] for i in train_idx],
             [labels[i] for i in train_idx],
             tokenizer,
-            max_length=ml,
+            max_length=MAX_LENGTH,
         )
 
         val_dataset = EmailDataset(
             [texts[i] for i in val_idx],
             [labels[i] for i in val_idx],
             tokenizer,
-            max_length=ml,
+            max_length=MAX_LENGTH,
         )
 
         model = WeightedDistilBertForSequenceClassification.from_pretrained(
@@ -191,11 +180,11 @@ def objective(trial, texts, labels, tokenizer, class_weights):
 
         training_args = TrainingArguments(
             output_dir=f"{BASE_OUTPUT_DIR}/trial_{trial.number}_fold_{fold}",
-            num_train_epochs=3,  # statt 5 → schneller
-            per_device_train_batch_size=bs,
-            per_device_eval_batch_size=bs,
-            learning_rate=lr,
-            warmup_ratio=wr,
+            num_train_epochs=NUM_TRAIN_EPOCHS,
+            per_device_train_batch_size=BATCH_SIZE,
+            per_device_eval_batch_size=BATCH_SIZE,
+            learning_rate=learning_rate,
+            warmup_ratio=WARMUP_RATIO,
             weight_decay=0.01,
             logging_steps=20,
             eval_strategy="epoch",
@@ -204,8 +193,8 @@ def objective(trial, texts, labels, tokenizer, class_weights):
             metric_for_best_model="eval_f1",
             greater_is_better=True,
             report_to="none",
+            dataloader_num_workers=4,
             dataloader_pin_memory=False,
-            dataloader_num_workers=4,  # mehr Worker für Speed
         )
 
         trainer = Trainer(
@@ -221,17 +210,22 @@ def objective(trial, texts, labels, tokenizer, class_weights):
         metrics = trainer.evaluate()
 
         if "eval_f1" not in metrics:
-            raise optuna.TrialPruned("No F1 score returned")
+            raise optuna.TrialPruned("No eval_f1 score returned")
 
-        fold_f1 = float(metrics["eval_f1"])
-        fold_f1_scores.append(fold_f1)
+        f1 = float(metrics["eval_f1"])
+        fold_f1_scores.append(f1)
 
-        # Zwischenergebnisse pro Fold im Trial speichern
-        trial.set_user_attr(f"fold_{fold}_f1", fold_f1)
+        # Zwischenergebnisse speichern
+        trial.set_user_attr(f"fold_{fold}_f1", f1)
         trial.set_user_attr(f"fold_{fold}_eval_loss", float(metrics.get("eval_loss", 0.0)))
 
     avg_f1 = float(np.mean(fold_f1_scores))
     trial.set_user_attr("avg_f1", avg_f1)
+
+    # Stop the sequential study after reaching the target without discarding the trial.
+    if avg_f1 >= TARGET_F1:
+        trial.set_user_attr("target_reached", True)
+        trial.study.stop()
 
     return avg_f1
 
@@ -255,7 +249,7 @@ def main():
         y=labels_arr,
     )
 
-    # Optuna Study mit SQLite-Persistenz & Resume
+    # Persistente Optuna-Study
     study = optuna.create_study(
         direction="maximize",
         study_name=STUDY_NAME,
@@ -266,10 +260,9 @@ def main():
     def wrapped_objective(trial):
         return objective(trial, texts, labels_arr, tokenizer, class_weights)
 
-    # Nur 5 Trials, GC nach jedem Trial
     study.optimize(
         wrapped_objective,
-        n_trials=5,
+        n_trials=N_TRIALS,
         gc_after_trial=True,
     )
 
@@ -278,7 +271,7 @@ def main():
     print("Value (F1):", best_trial.value)
     print("Params:", best_trial.params)
 
-    # Logging Trials to CSV
+    # CSV Logging
     csv_path = os.path.join(BASE_OUTPUT_DIR, "optuna_results.csv")
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -288,19 +281,17 @@ def main():
                 t.number,
                 t.value,
                 t.params.get("learning_rate"),
-                t.params.get("batch_size"),
-                t.params.get("max_length"),
-                t.params.get("warmup_ratio"),
+                BATCH_SIZE,
+                MAX_LENGTH,
+                WARMUP_RATIO,
             ])
 
-    # Train final model with best params on full data
+    # Finales Training
     num_labels = len(LABEL2ID)
-    best_lr = best_trial.params["learning_rate"]
-    best_bs = best_trial.params["batch_size"]
-    best_ml = best_trial.params["max_length"]
-    best_wr = best_trial.params["warmup_ratio"]
+    best_lr = best_trial.params.get("learning_rate", 3e-5)
+    best_bs = BATCH_SIZE
 
-    final_dataset = EmailDataset(texts, labels, tokenizer, max_length=best_ml)
+    final_dataset = EmailDataset(texts, labels, tokenizer, max_length=MAX_LENGTH)
     final_model = WeightedDistilBertForSequenceClassification.from_pretrained(
         MODEL_NAME,
         num_labels=num_labels,
@@ -309,18 +300,18 @@ def main():
 
     final_args = TrainingArguments(
         output_dir=f"{BASE_OUTPUT_DIR}/final",
-        num_train_epochs=3,  # auch hier kürzer
+        num_train_epochs=NUM_TRAIN_EPOCHS,
         per_device_train_batch_size=best_bs,
         per_device_eval_batch_size=best_bs,
         learning_rate=best_lr,
-        warmup_ratio=best_wr,
+        warmup_ratio=WARMUP_RATIO,
         weight_decay=0.01,
         logging_steps=20,
         eval_strategy="epoch",
         save_strategy="epoch",
         report_to="none",
-        dataloader_pin_memory=False,
         dataloader_num_workers=4,
+        dataloader_pin_memory=False,
     )
 
     final_trainer = Trainer(
@@ -333,7 +324,7 @@ def main():
 
     final_trainer.train()
 
-    # Save final model for deployment
+    # Deployment
     final_model.save_pretrained(DEPLOY_DIR)
     tokenizer.save_pretrained(DEPLOY_DIR)
     print(f"\nDeployed model saved to: {DEPLOY_DIR}")
@@ -346,8 +337,7 @@ def main():
     )
 
     final_model.eval()
-    all_preds = []
-    all_true = []
+    all_preds, all_true = [], []
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     final_model.to(device)
@@ -358,18 +348,14 @@ def main():
             attention_mask = batch["attention_mask"].to(device)
             labels_batch = batch["labels"].to(device)
 
-            outputs = final_model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-            )
-            logits = outputs["logits"]
-            preds = torch.argmax(logits, dim=-1)
+            outputs = final_model(input_ids=input_ids, attention_mask=attention_mask)
+            preds = torch.argmax(outputs["logits"], dim=-1)
 
             all_preds.extend(preds.cpu().numpy())
             all_true.extend(labels_batch.cpu().numpy())
 
     cm = confusion_matrix_per_class(all_true, all_preds)
-    print("\nConfusion Matrix (label indices):")
+    print("\nConfusion Matrix:")
     print(cm)
     print("\nLabels mapping:", LABEL2ID)
 

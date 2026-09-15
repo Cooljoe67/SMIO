@@ -1,6 +1,8 @@
 # Core NLP & ML
 transformers
 torch
+datasets
+seqeval
 sentencepiece
 scikit-learn
 pandas

@@ -1,10 +1,15 @@
-from fastapi import FastAPI
-from .routers import inbox, delivery, summary, model, imap, classifier
+import logging
 
-from src.db.database import engine
+from fastapi import FastAPI
+from .routers import inbox, summary, imap
+
+from src.db.database import engine, ensure_email_columns
 from src.db.models import Base
 
+logging.basicConfig(level=logging.INFO)
+
 Base.metadata.create_all(bind=engine)
+ensure_email_columns()
 
 
 app = FastAPI(
@@ -14,11 +19,8 @@ app = FastAPI(
 )
 
 app.include_router(inbox.router)
-app.include_router(delivery.router)
 app.include_router(summary.router)
-app.include_router(model.router)
 app.include_router(imap.router)
-app.include_router(classifier.router)
 
 @app.get("/")
 def root():
