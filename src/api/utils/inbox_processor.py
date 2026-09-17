@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timezone
 
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
@@ -97,6 +98,7 @@ def process_email_by_id(email_id: int, db: Session, batch_id: int = None, mailbo
 
         email.processed = int(email.processed or 0) + 1
         email.processing_batch = batch_id
+        email.processed_at = datetime.now(timezone.utc).replace(tzinfo=None)
         db.commit()
         logger.info(
             "Email %s processed successfully (count=%s, batch=%s)",

@@ -1,8 +1,13 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean
 from sqlalchemy.orm import declarative_base
-from datetime import datetime
+from datetime import datetime, timezone
 
 Base = declarative_base()
+
+
+def _utcnow():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
 
 class Email(Base):
     __tablename__ = "emails"
@@ -14,7 +19,7 @@ class Email(Base):
 
     subject = Column(String)
     sender = Column(String)
-    date = Column(DateTime, default=datetime.utcnow)
+    date = Column(DateTime, default=_utcnow)
     read_at = Column(DateTime, nullable=True, index=True)
 
     text = Column(Text)
@@ -41,6 +46,13 @@ class Email(Base):
     # Number of times this email has been processed.
     processed = Column(Integer, default=0, nullable=False)
     processing_batch = Column(Integer, nullable=True, index=True)
+    processed_at = Column(DateTime, nullable=True, index=True)
 
     true_label = Column(String, nullable=True)
+
+    # Set to the retrain run id once this correction has been used for fine-tuning.
+    retrain_batch = Column(Integer, nullable=True, index=True)
+
+    # Permanently reserved for evaluation; never used for training.
+    is_eval_holdout = Column(Boolean, default=False, nullable=False)
 
