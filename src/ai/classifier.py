@@ -17,6 +17,17 @@ _model = DistilBertForSequenceClassification.from_pretrained(MODEL_PATH)
 _model.eval()
 
 
+def reload_model():
+    """Reload tokenizer/model from MODEL_PATH, e.g. after a promoted retrain run."""
+    global _tokenizer, _model
+    _tokenizer = DistilBertTokenizerFast.from_pretrained(
+        MODEL_PATH,
+        clean_up_tokenization_spaces=True,
+    )
+    _model = DistilBertForSequenceClassification.from_pretrained(MODEL_PATH)
+    _model.eval()
+
+
 def predict_text(text):
     inputs = _tokenizer(
         text or "",

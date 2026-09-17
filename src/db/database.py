@@ -27,6 +27,9 @@ def ensure_email_columns():
         "message_id": "TEXT",
         "classification_source": "TEXT",
         "read_at": "DATETIME",
+        "retrain_batch": "INTEGER",
+        "processed_at": "DATETIME",
+        "is_eval_holdout": "BOOLEAN",
     }
     existing_columns = {
         column["name"] for column in inspect(engine).get_columns("emails")
@@ -39,6 +42,9 @@ def ensure_email_columns():
                 )
         connection.execute(
             text("UPDATE emails SET processed = 0 WHERE processed IS NULL")
+        )
+        connection.execute(
+            text("UPDATE emails SET is_eval_holdout = 0 WHERE is_eval_holdout IS NULL")
         )
         connection.execute(
             text(

@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from imap_tools import MailBox
 from src.db.database import SessionLocal
@@ -103,7 +103,7 @@ def _move_to_trash(mailbox, email):
 
 
 def cleanup_expired_read_mails(db, mailbox):
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     moved = 0
     skipped_unread = 0
     errors = []
@@ -175,7 +175,7 @@ def _sync_message(db, msg, folder_name, allow_new):
     email_obj.text = msg.text
     email_obj.html = msg.html
     if _is_seen(msg) and email_obj.read_at is None:
-        email_obj.read_at = datetime.utcnow()
+        email_obj.read_at = datetime.now(timezone.utc).replace(tzinfo=None)
         logger.info("Email %s first observed as read", email_obj.id)
 
     folder_classification = _classification_from_folder(folder_name)
