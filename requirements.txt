@@ -2,36 +2,25 @@
 transformers
 torch
 datasets
-seqeval
-sentencepiece
 scikit-learn
-pandas
 numpy
+optuna
 
-# spaCy + English model
-spacy
-en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1.tar.gz
+# Evaluation plots (scripts/evaluate_classifier.py)
+matplotlib
+seaborn
 
 # FastAPI backend
 fastapi
 uvicorn[standard]
+pydantic-settings
 
-# Email handling
-imaplib2
-email-validator
-
-# Environment variables
+# Email handling (IMAP fetch/move, .env loading)
+imap-tools
 python-dotenv
 
-# Scheduling (optional)
-APScheduler
-
 # Utilities
-requests
 beautifulsoup4
 
 # Database (SQLite helpers)
 sqlalchemy
-
-# Optional: Streamlit dashboard
-streamlit
