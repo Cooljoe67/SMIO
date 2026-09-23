@@ -26,6 +26,7 @@ from transformers import (
 from src.ai import classifier
 from src.ai.labels import LABEL2ID
 from src.db.models import Email
+from src.storage import gcs
 
 logger = logging.getLogger(__name__)
 
@@ -225,7 +226,7 @@ def retrain_if_due(db, min_corrections=MIN_CORRECTIONS):
         num_train_epochs=NUM_TRAIN_EPOCHS,
         per_device_train_batch_size=BATCH_SIZE,
         per_device_eval_batch_size=BATCH_SIZE,
-        evaluation_strategy="epoch",
+        eval_strategy="epoch",
         save_strategy="no",
         logging_steps=20,
         report_to=[],
@@ -253,6 +254,7 @@ def retrain_if_due(db, min_corrections=MIN_CORRECTIONS):
         if MODEL_DIR.exists():
             shutil.rmtree(MODEL_DIR)
         shutil.copytree(candidate_dir, MODEL_DIR)
+        gcs.upload_directory(MODEL_DIR, classifier.MODEL_GCS_PREFIX)
         classifier.reload_model()
         logger.info("Retrain run %d promoted: F1 %.3f -> %.3f", run_id, baseline_f1, new_f1)
     else:

@@ -38,7 +38,7 @@ SMIO connects to your mailbox via IMAP, classifies incoming mails with a fine-tu
 - Python 3.x
 - HuggingFace Transformers (DistilBERT for classification, token classification for NER)
 - PyTorch, scikit-learn (F1 evaluation)
-- FastAPI + SQLAlchemy (SQLite)
+- FastAPI + SQLAlchemy (SQLite, optionally synchronized to Google Cloud Storage)
 - imap-tools (IMAP access)
 - pydantic-settings (`.env` configuration)
 
@@ -109,6 +109,67 @@ uvicorn src.api.main:app --reload
 ```
 API available at http://localhost:8000
 
+### Docker
+Build the API image (the `.env` file is deliberately excluded; pass secrets as environment variables):
+
+```bash
+docker build -t smio:local .
+docker run --rm -p 8080:8080 --env-file .env smio:local
+```
+
+The container serves the API at `http://localhost:8080`. For Cloud Run, configure
+the same environment variables through Secret Manager or the Cloud Run service
+configuration; do not add `.env` to the image.
+
+### Cloud Run and Cloud Scheduler
+The API exposes two scheduler endpoints:
+
+| Method | Path | Schedule | Work |
+|---|---|---|---|
+| POST | `/jobs/five-minute` | Every 5 minutes | Fetch, process instruction mails, classify and file new mail |
+| POST | `/jobs/daily` | Daily | Send the daily summary and retrain if enough corrections exist |
+
+Deploy the image from source. Keep both the Cloud Run instance count and request
+concurrency at one while SQLite is stored in GCS:
+
+```bash
+gcloud run deploy smio \
+  --source . \
+  --region=europe-west3 \
+  --no-allow-unauthenticated \
+  --max-instances=1 \
+  --concurrency=1 \
+  --timeout=3600 \
+  --set-env-vars=GCS_BUCKET=your-smio-bucket,GCS_CLASSIFIER_MODEL_PREFIX=models/distilbert_deployed,GCS_DATABASE_OBJECT=databases/smio.db
+```
+
+Set IMAP and SMTP values with Secret Manager rather than command-line environment
+variables. Give the Cloud Run service account read/write access to the GCS bucket.
+Create a dedicated scheduler service account, grant it `roles/run.invoker` on the
+`smio` service, then create the schedules with an OIDC token:
+
+```bash
+gcloud scheduler jobs create http smio-five-minute \
+  --location=europe-west3 \
+  --schedule="*/5 * * * *" \
+  --uri="https://YOUR_CLOUD_RUN_URL/jobs/five-minute" \
+  --http-method=POST \
+  --oidc-service-account-email=YOUR_SCHEDULER_SERVICE_ACCOUNT
+
+gcloud scheduler jobs create http smio-daily \
+  --location=europe-west3 \
+  --schedule="0 8 * * *" \
+  --time-zone="Europe/Berlin" \
+  --uri="https://YOUR_CLOUD_RUN_URL/jobs/daily" \
+  --http-method=POST \
+  --attempt-deadline=30m \
+  --oidc-service-account-email=YOUR_SCHEDULER_SERVICE_ACCOUNT
+```
+
+Cloud Scheduler's HTTP deadline is limited to 30 minutes. If retraining can exceed
+that, move the retraining part of the daily routine to a Cloud Run Job; do not let a
+long training request be retried while it is still running.
+
 ### 5. Run the full workflow once (fetch, process, summarize, retrain)
 ```bash
 python -m scripts.run_workflow
@@ -132,19 +193,52 @@ IMAP_HOST=imap.yourprovider.com
 IMAP_USER=your_email@example.com
 IMAP_PASSWORD=your_password
 
-# SMTP (optional — only needed to receive the daily summary email)
-SMTP_HOST=smtp.yourprovider.com
-SMTP_PORT=465
-SMTP_USER=your_email@example.com
-SMTP_PASSWORD=your_password
-SMTP_TO_ADDRESS=your_email@example.com
-SMTP_FROM_NAME=SMIO, your mail organizer
+# Gmail API (optional — only needed to receive the daily summary email)
+GMAIL_CLIENT_ID=your-oauth-client-id
+GMAIL_CLIENT_SECRET=your-oauth-client-secret
+GMAIL_REFRESH_TOKEN=your-oauth-refresh-token
+GMAIL_TO_ADDRESS=your_email@example.com
+# Gmail must authorize the configured sender address.
+GMAIL_FROM_ADDRESS=cooljoe67@gmail.com
+GMAIL_FROM_NAME=Smio, der Mail Organizer
 
 # Personalization
 USER_FIRST_NAME=Marcus
+
+# Optional: persist the deployed classifier and SQLite database in GCS.
+# Cloud Run uses its service account through Application Default Credentials.
+GCS_BUCKET=your-smio-bucket
+GCS_CLASSIFIER_MODEL_PREFIX=models/distilbert_deployed
+GCS_DATABASE_OBJECT=databases/smio.db
 ```
 
-`SMTP_HOST` left empty disables the summary email (it's simply skipped, no error).
+When the Gmail OAuth settings are absent, summary delivery is skipped. The daily
+summary period is only advanced after Gmail accepts the message.
+
+To configure Gmail delivery, enable the Gmail API in the Google Cloud project, then
+create an OAuth consent screen and a **Desktop app** OAuth client for
+`cooljoe67@gmail.com`. Download that client's JSON file locally and run:
+
+```bash
+python -m pip install -r requirements.txt
+python scripts/create_gmail_refresh_token.py --client-secrets path/to/client_secret.json
+```
+
+The browser authorization must use `cooljoe67@gmail.com`. Store the resulting refresh
+token, client ID, and client secret in Secret Manager as `gmail-refresh-token`,
+`gmail-client-id`, and `gmail-client-secret`. Configure `GMAIL_TO_ADDRESS` to the
+1&1 recipient address. Do not add the downloaded OAuth client JSON or refresh token
+to the repository.
+
+When `GCS_BUCKET` is configured, SMIO downloads the deployed model and database at
+startup. The first GCS-enabled run uploads its existing local artifacts if the bucket
+does not yet contain them. Promoted classifier models and committed SQLite changes are
+uploaded automatically. The Cloud Run service account needs `Storage Object Admin` (or
+equivalent read/write access) for the configured bucket.
+
+GCS-backed SQLite must run with a single active writer/instance. For concurrent Cloud
+Run instances, set `DATABASE_URL` to a managed database such as Cloud SQL instead;
+GCS continues to store the deployed classifier model.
 
 ---
 
@@ -166,6 +260,8 @@ USER_FIRST_NAME=Marcus
 | POST | `/inbox/process_unprocessed` | Classify + extract entities + move all unprocessed mails |
 | POST | `/inbox/undo_last_processing` | Revert the last processing batch, restore mails to INBOX |
 | GET | `/summary/daily` | Generate (and return) the daily digest text |
+| POST | `/jobs/five-minute` | Cloud Scheduler: fetch and process new mail |
+| POST | `/jobs/daily` | Cloud Scheduler: send daily summary and retrain |
 
 ---
 

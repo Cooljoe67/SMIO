@@ -1,13 +1,37 @@
-from sqlalchemy import create_engine, inspect, text
+import os
+from pathlib import Path
+
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import sessionmaker
 
-DATABASE_URL = "sqlite:///./smio.db"
+from src.storage import gcs
+
+
+DATABASE_PATH = Path(os.getenv("SQLITE_DB_PATH", "./smio.db"))
+DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DATABASE_PATH.as_posix()}")
+DATABASE_GCS_OBJECT = os.getenv("GCS_DATABASE_OBJECT", "databases/smio.db")
+USING_SQLITE = DATABASE_URL.startswith("sqlite:")
+
+if gcs.enabled() and USING_SQLITE:
+    if not gcs.download_file(DATABASE_GCS_OBJECT, DATABASE_PATH) and DATABASE_PATH.exists():
+        gcs.upload_file(DATABASE_PATH, DATABASE_GCS_OBJECT)
 
 engine = create_engine(
-    DATABASE_URL, connect_args={"check_same_thread": False}
+    DATABASE_URL, connect_args={"check_same_thread": False} if USING_SQLITE else {}
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+def persist_database():
+    """Publish the committed local SQLite database to GCS when configured."""
+    if gcs.enabled() and USING_SQLITE and DATABASE_PATH.exists():
+        gcs.upload_file(DATABASE_PATH, DATABASE_GCS_OBJECT)
+
+
+@event.listens_for(SessionLocal, "after_commit")
+def _persist_committed_database(session):
+    persist_database()
 
 
 def ensure_email_columns():
@@ -60,6 +84,7 @@ def ensure_email_columns():
         }
         for column_name in obsolete_columns & existing_columns:
             connection.execute(text(f"ALTER TABLE emails DROP COLUMN {column_name}"))
+    persist_database()
 
 
 def get_db():

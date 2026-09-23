@@ -7,11 +7,15 @@ from pathlib import Path
 from src.api.utils.folder_rules import CLASSIFICATION_FOLDERS
 from src.api.utils.settings import app_settings
 from src.db.models import Email
+from src.storage import gcs
 
 STATE_FILE = Path("./data/summary_state.json")
+STATE_GCS_OBJECT = "state/summary_state.json"
 
 
 def _load_period_start():
+    if gcs.enabled():
+        gcs.download_file(STATE_GCS_OBJECT, STATE_FILE)
     if STATE_FILE.exists():
         state = json.loads(STATE_FILE.read_text())
         last_summary_at = state.get("last_summary_at")
@@ -24,9 +28,20 @@ def _load_period_start():
 def _save_period_end(timestamp):
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps({"last_summary_at": timestamp.isoformat()}))
+    gcs.upload_file(STATE_FILE, STATE_GCS_OBJECT)
 
 
-def build_daily_summary(db):
+def persist_summary_period_end(timestamp):
+    """Advance the summary period after its scheduled delivery succeeds."""
+    _save_period_end(datetime.fromisoformat(timestamp))
+
+
+def build_daily_summary(db, persist=True):
+    """Build the digest since the last summary.
+
+    persist=False builds an on-demand summary (e.g. requested via instruction mail)
+    without moving the period start used by the next scheduled summary.
+    """
     period_start = _load_period_start()
     period_end = datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -57,7 +72,8 @@ def build_daily_summary(db):
     if not other_senders and not any(moved_counts.values()):
         lines.append("Nothing new since the last summary.")
 
-    _save_period_end(period_end)
+    if persist:
+        _save_period_end(period_end)
 
     return {
         "message": "\n".join(lines),
