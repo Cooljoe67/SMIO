@@ -1,5 +1,5 @@
 # Core NLP & ML
-transformers
+transformers==4.44.2
 torch
 datasets
 scikit-learn
@@ -21,6 +21,11 @@ python-dotenv
 
 # Utilities
 beautifulsoup4
+google-cloud-storage
+google-api-python-client
+google-auth
+google-auth-oauthlib
 
 # Database (SQLite helpers)
 sqlalchemy
+

@@ -1,31 +1,52 @@
-"""Sends the daily summary as a plain-text email via SMTP."""
+"""Sends summary emails through the Gmail API."""
 
+import base64
 import logging
-import smtplib
 from email.mime.text import MIMEText
 from email.utils import formataddr
 
-from .settings import smtp_settings
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+
+from .settings import gmail_settings
 
 logger = logging.getLogger(__name__)
 
+GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
+
 
 def send_summary_email(body, subject="SMIO Daily Summary"):
-    if not smtp_settings.host or not smtp_settings.to_address:
-        logger.info("SMTP not configured, skipping summary email")
+    if not all((
+        gmail_settings.client_id,
+        gmail_settings.client_secret,
+        gmail_settings.refresh_token,
+        gmail_settings.to_address,
+    )):
+        logger.info("Gmail API not configured, skipping summary email")
         return False
 
     message = MIMEText(body)
     message["Subject"] = subject
-    message["From"] = formataddr((smtp_settings.from_name, smtp_settings.user))
-    message["To"] = smtp_settings.to_address
+    message["From"] = formataddr((gmail_settings.from_name, gmail_settings.from_address))
+    message["To"] = gmail_settings.to_address
 
     try:
-        with smtplib.SMTP_SSL(smtp_settings.host, smtp_settings.port) as server:
-            server.login(smtp_settings.user, smtp_settings.password)
-            server.send_message(message)
-        logger.info("Daily summary email sent to %s", smtp_settings.to_address)
+        credentials = Credentials(
+            token=None,
+            refresh_token=gmail_settings.refresh_token,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=gmail_settings.client_id,
+            client_secret=gmail_settings.client_secret,
+            scopes=[GMAIL_SEND_SCOPE],
+        )
+        service = build("gmail", "v1", credentials=credentials, cache_discovery=False)
+        encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
+        service.users().messages().send(
+            userId="me",
+            body={"raw": encoded_message},
+        ).execute()
+        logger.info("Daily summary email sent to %s", gmail_settings.to_address)
         return True
     except Exception:
-        logger.exception("Failed to send daily summary email")
+        logger.exception("Failed to send daily summary email with Gmail API")
         return False

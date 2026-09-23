@@ -4,11 +4,23 @@ import torch
 from transformers import DistilBertForSequenceClassification, DistilBertTokenizerFast
 
 from src.ai.labels import ID2LABEL
+from src.storage import gcs
 
 
 MODEL_PATH = os.getenv("CLASSIFIER_MODEL_PATH", "./models/distilbert_deployed")
+MODEL_GCS_PREFIX = os.getenv("GCS_CLASSIFIER_MODEL_PREFIX", "models/distilbert_deployed")
 MAX_LENGTH = 256
 
+
+def _sync_deployed_model():
+    """Use the GCS model when configured, seeding it from the local model once."""
+    if not gcs.enabled():
+        return
+    if not gcs.download_directory(MODEL_GCS_PREFIX, MODEL_PATH):
+        gcs.upload_directory(MODEL_PATH, MODEL_GCS_PREFIX)
+
+
+_sync_deployed_model()
 _tokenizer = DistilBertTokenizerFast.from_pretrained(
     MODEL_PATH,
     clean_up_tokenization_spaces=True,
@@ -20,6 +32,7 @@ _model.eval()
 def reload_model():
     """Reload tokenizer/model from MODEL_PATH, e.g. after a promoted retrain run."""
     global _tokenizer, _model
+    _sync_deployed_model()
     _tokenizer = DistilBertTokenizerFast.from_pretrained(
         MODEL_PATH,
         clean_up_tokenization_spaces=True,
