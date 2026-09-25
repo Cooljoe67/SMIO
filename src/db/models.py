@@ -16,6 +16,9 @@ class Email(Base):
     uid = Column(String, index=True)
     message_id = Column(String, index=True)
     folder = Column(String, default="INBOX")
+    removed_at = Column(DateTime, nullable=True, index=True)
+    removal_reason = Column(String, nullable=True)
+    last_seen_at = Column(DateTime, nullable=True, index=True)
 
     subject = Column(String)
     sender = Column(String)

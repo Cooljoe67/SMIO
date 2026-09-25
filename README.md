@@ -121,6 +121,40 @@ The container serves the API at `http://localhost:8080`. For Cloud Run, configur
 the same environment variables through Secret Manager or the Cloud Run service
 configuration; do not add `.env` to the image.
 
+### Local operation without Google Cloud
+
+Google Cloud Storage is optional. For a local PC or Raspberry Pi, leave
+`GCS_BUCKET` unset. SMIO then uses the checked-out files directly:
+
+- classifier: `models/distilbert_deployed`
+- NER model: `models/ner-smio`
+- SQLite database: `./smio.db`
+- retraining state and candidates: `models/`
+
+Before the first run on a new machine, install Git LFS and hydrate the model
+files. Otherwise Git may leave large model files as small LFS pointer files:
+
+```bash
+git lfs install
+git lfs pull
+```
+
+Then create a local `.env` containing the IMAP settings and start the API from
+the repository root:
+
+```bash
+uvicorn src.api.main:app --host 0.0.0.0 --port 8080
+```
+
+Do not set `GCS_BUCKET` in local mode. After local retraining promotes a model,
+the changed Git LFS file can be reviewed and versioned normally:
+
+```bash
+git add models/distilbert_deployed
+git commit -m "Update deployed classifier model"
+git push
+```
+
 ### Cloud Run and Cloud Scheduler
 The API exposes two scheduler endpoints:
 

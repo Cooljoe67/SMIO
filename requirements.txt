@@ -1,5 +1,6 @@
 # Core NLP & ML
 transformers==4.44.2
+accelerate>=0.21.0
 torch
 datasets
 scikit-learn

@@ -7,6 +7,7 @@ Retraining only happens once enough new corrections have accumulated.
 
 import json
 import logging
+import os
 import random
 import shutil
 from datetime import datetime, timezone
@@ -14,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from sklearn.metrics import f1_score
+from sklearn.metrics import accuracy_score, f1_score, recall_score
 from torch.utils.data import Dataset
 from transformers import (
     DistilBertForSequenceClassification,
@@ -35,7 +36,7 @@ MAX_LENGTH = classifier.MAX_LENGTH
 STATE_FILE = Path("./models/retrain_state.json")
 LOG_FILE = Path("./models/retrain_log.jsonl")
 
-MIN_CORRECTIONS = 20
+MIN_CORRECTIONS = int(os.getenv("SMIO_MIN_CORRECTIONS", "20"))
 REPLAY_RATIO = 0.9
 # Fraction of *new* corrections permanently reserved for eval (never trained on),
 # so the hold-out set stays representative of real, evolving mail patterns.
@@ -168,13 +169,25 @@ def _tokenize(tokenizer, texts):
 def _compute_metrics(eval_pred):
     logits, labels = eval_pred
     predictions = np.argmax(logits, axis=1)
-    return {"f1_macro": f1_score(labels, predictions, average="macro")}
+    return {
+        "accuracy": accuracy_score(labels, predictions),
+        "recall_macro": recall_score(
+            labels, predictions, average="macro", zero_division=0
+        ),
+        "f1_macro": f1_score(labels, predictions, average="macro"),
+    }
 
 
-def _deployed_model_f1(eval_texts, eval_labels):
-    """Score the currently deployed model on the permanent hold-out for a fair comparison."""
+def _deployed_model_metrics(eval_texts, eval_labels):
+    """Score the currently deployed model on the permanent hold-out."""
     predictions = [LABEL2ID[classifier.predict_text(text)[0]] for text in eval_texts]
-    return f1_score(eval_labels, predictions, average="macro")
+    return {
+        "accuracy": accuracy_score(eval_labels, predictions),
+        "recall_macro": recall_score(
+            eval_labels, predictions, average="macro", zero_division=0
+        ),
+        "f1_macro": f1_score(eval_labels, predictions, average="macro"),
+    }
 
 
 def _load_holdout(db):
@@ -239,12 +252,17 @@ def retrain_if_due(db, min_corrections=MIN_CORRECTIONS):
         compute_metrics=_compute_metrics,
     )
     trainer.train()
-    new_f1 = trainer.evaluate()["eval_f1_macro"]
-    baseline_f1 = _deployed_model_f1(eval_texts, eval_labels)
+    evaluation = trainer.evaluate()
+    new_metrics = {
+        "accuracy": evaluation["eval_accuracy"],
+        "recall_macro": evaluation["eval_recall_macro"],
+        "f1_macro": evaluation["eval_f1_macro"],
+    }
+    baseline_metrics = _deployed_model_metrics(eval_texts, eval_labels)
 
     state = _load_state()
     run_id = state.get("last_run_id", 0) + 1
-    promoted = new_f1 >= baseline_f1
+    promoted = new_metrics["f1_macro"] >= baseline_metrics["f1_macro"]
 
     candidate_dir.mkdir(parents=True, exist_ok=True)
     trainer.save_model(str(candidate_dir))
@@ -256,11 +274,19 @@ def retrain_if_due(db, min_corrections=MIN_CORRECTIONS):
         shutil.copytree(candidate_dir, MODEL_DIR)
         gcs.upload_directory(MODEL_DIR, classifier.MODEL_GCS_PREFIX)
         classifier.reload_model()
-        logger.info("Retrain run %d promoted: F1 %.3f -> %.3f", run_id, baseline_f1, new_f1)
+        logger.info(
+            "Retrain run %d promoted: F1 %.3f -> %.3f",
+            run_id,
+            baseline_metrics["f1_macro"],
+            new_metrics["f1_macro"],
+        )
     else:
         logger.info(
             "Retrain run %d NOT promoted: F1 %.3f -> %.3f (candidate kept at %s)",
-            run_id, baseline_f1, new_f1, candidate_dir,
+            run_id,
+            baseline_metrics["f1_macro"],
+            new_metrics["f1_macro"],
+            candidate_dir,
         )
 
     for email in train_emails:
@@ -270,17 +296,25 @@ def retrain_if_due(db, min_corrections=MIN_CORRECTIONS):
 
     state.update({
         "last_run_id": run_id,
-        "last_f1": new_f1 if promoted else state.get("last_f1"),
+        "last_f1": new_metrics["f1_macro"] if promoted else state.get("last_f1"),
         "last_run_at": timestamp,
+        "last_metrics": new_metrics if promoted else state.get("last_metrics", baseline_metrics),
     })
+    if promoted:
+        state["last_promoted_at"] = timestamp
     _save_state(state)
 
     result = {
         "retrained": True,
+        "run_at": timestamp,
         "run_id": run_id,
         "promoted": promoted,
-        "baseline_f1": baseline_f1,
-        "new_f1": new_f1,
+        "baseline_accuracy": baseline_metrics["accuracy"],
+        "baseline_recall_macro": baseline_metrics["recall_macro"],
+        "baseline_f1": baseline_metrics["f1_macro"],
+        "new_accuracy": new_metrics["accuracy"],
+        "new_recall_macro": new_metrics["recall_macro"],
+        "new_f1": new_metrics["f1_macro"],
         "batch_sizes": batch_sizes,
         "new_holdout_count": len(new_holdout_emails),
         "eval_holdout_size": len(eval_texts),
