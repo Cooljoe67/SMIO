@@ -58,7 +58,10 @@ def run_daily_workflow():
         db = SessionLocal()
         try:
             summary = build_daily_summary(db, persist=False)
-            sent = send_summary_email(summary["message"])
+            sent = send_summary_email(
+                summary["message"],
+                html_body=summary.get("html_message"),
+            )
             if sent:
                 persist_summary_period_end(summary["period_end"])
             retrain_result = retrain_if_due(db)

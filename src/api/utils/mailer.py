@@ -2,6 +2,7 @@
 
 import base64
 import logging
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr
 
@@ -15,7 +16,7 @@ logger = logging.getLogger(__name__)
 GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
 
 
-def send_summary_email(body, subject="SMIO Daily Summary"):
+def send_summary_email(body, html_body=None, subject="SMIO Daily Summary"):
     if not all((
         gmail_settings.client_id,
         gmail_settings.client_secret,
@@ -25,7 +26,12 @@ def send_summary_email(body, subject="SMIO Daily Summary"):
         logger.info("Gmail API not configured, skipping summary email")
         return False
 
-    message = MIMEText(body)
+    if html_body:
+        message = MIMEMultipart("alternative")
+        message.attach(MIMEText(body, "plain", "utf-8"))
+        message.attach(MIMEText(html_body, "html", "utf-8"))
+    else:
+        message = MIMEText(body, "plain", "utf-8")
     message["Subject"] = subject
     message["From"] = formataddr((gmail_settings.from_name, gmail_settings.from_address))
     message["To"] = gmail_settings.to_address

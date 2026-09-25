@@ -137,6 +137,8 @@ def cleanup_expired_read_mails(db, mailbox):
 
                 _move_to_trash(mailbox, email)
                 email.folder = TRASH_FOLDER
+                email.removed_at = now
+                email.removal_reason = "retention"
                 moved += 1
                 logger.info(
                     "Email %s moved from %s to %s after %s retention days",
@@ -165,6 +167,11 @@ def _sync_message(db, msg, folder_name, allow_new):
     if new_email:
         email_obj = Email(message_id=message_id)
 
+    sync_timestamp = datetime.now(timezone.utc).replace(tzinfo=None)
+    email_obj.last_seen_at = sync_timestamp
+    if email_obj.removal_reason == "external":
+        email_obj.removed_at = None
+        email_obj.removal_reason = None
     previous_folder = email_obj.folder
     previous_classification = email_obj.classification
     email_obj.uid = msg.uid
@@ -211,15 +218,24 @@ def sync_existing_mails():
     with MailBox(email_settings.host).login(email_settings.user, email_settings.password) as mailbox:
         db = SessionLocal()
         try:
+            sync_started = datetime.now(timezone.utc).replace(tzinfo=None)
+            active_folders = set(_folder_names(mailbox))
             checked = 0
             changed = 0
-            for folder_name in _folder_names(mailbox):
+            for folder_name in active_folders:
                 mailbox.folder.set(folder_name, readonly=True)
                 for msg in mailbox.fetch(mark_seen=False):
                     email_obj = _sync_message(db, msg, folder_name, allow_new=False)
                     checked += 1
                     if email_obj is not None:
                         changed += 1
+            stale_emails = db.query(Email).filter(
+                Email.folder.in_(active_folders),
+                (Email.last_seen_at.is_(None) | (Email.last_seen_at < sync_started)),
+            ).all()
+            for email in stale_emails:
+                email.removed_at = sync_started
+                email.removal_reason = "external"
             db.commit()
             cleanup = cleanup_expired_read_mails(db, mailbox)
             db.commit()
