@@ -1,6 +1,7 @@
 """Run locally once to authorize Gmail API delivery and print a refresh token."""
 
 import argparse
+from pathlib import Path
 
 from google_auth_oauthlib.flow import InstalledAppFlow
 
@@ -12,7 +13,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--client-secrets",
-        required=True,
+        default=Path(
+            r"C:\Users\Marcus\Downloads\client_secret_950308348565-4ra9kl0oj5b0p03o539gitd96ordsj6v.apps.googleusercontent.com.json"
+        ),
+        type=Path,
         help="Path to the OAuth desktop-client JSON downloaded from Google Cloud.",
     )
     args = parser.parse_args()

@@ -1,0 +1,19 @@
+ok - inbox-processing: move to subfolders
+ok - inbox-processing: delete mails in subfolders acording to rules
+ok - inbox-processing: regognize classification correction
+new route (later): inbox-processing distribute undeleted and read mails in subfolders of save
+ok - new route: undo last processing
+ok - route: create summary
+new: route retrain
+
+deployed model and db  --> GCS
+
+scheduler --> Google Cloud Scheduler
+
+communication: Mails with undo, retrain, done, remove communication mails after processing
+
+docker integration +  Google cloud run 
+
+upgrade summary, classificaten F1, deliverey details, mails purged from folders
+
+0 start training

@@ -19,8 +19,8 @@ SMIO connects to your mailbox via IMAP, classifies incoming mails with a fine-tu
   - Detects manual corrections: if you move a mail to a different folder yourself, SMIO records that as the ground-truth label (`true_label`) for future retraining.
   - `undo_last_processing` reverts the most recent processing batch and moves mails back to `INBOX`.
 
-- **Daily summary email**
-  Generates a plain-language digest of everything processed since the last summary (new `other` senders, counts of mails moved per category) and emails it to you via SMTP before the retrain step runs — see [src/ai/daily_summary.py](src/ai/daily_summary.py) and [src/api/utils/mailer.py](src/api/utils/mailer.py).
+- **Persistent daily summary snapshots**
+  Builds a logical-day digest from `08:00` to `08:00` in the configured timezone, stores the message and queryable metrics in the `summary_snapshots` table, and can send the stored snapshot by email. The snapshot includes category counts, unread and retention-removal counts, delivery details, and retraining status — see [src/ai/daily_summary.py](src/ai/daily_summary.py).
 
 - **Self-improving classifier (replay-buffer retraining)**
   Once enough manual corrections accumulate (default: 20, configurable), SMIO fine-tunes the deployed model on a mix of the new corrections and a random sample of existing labeled data per class (90/10 replay ratio), evaluates the candidate against the currently deployed model on a fixed, continuously-growing hold-out set, and only promotes the new model if its macro-F1 is at least as good — see [src/ai/retrain.py](src/ai/retrain.py).
@@ -29,7 +29,7 @@ SMIO connects to your mailbox via IMAP, classifies incoming mails with a fine-tu
   Endpoints for IMAP sync/fetch, inbox processing, and the daily summary (see below).
 
 - **Sequential cron workflow**
-  A single script ([scripts/run_workflow.py](scripts/run_workflow.py)) runs the whole pipeline end to end — intended to be scheduled (e.g. Windows Task Scheduler) rather than run as a background API task.
+  The workflow can run as one daily operation or as separate gather, send, and retrain jobs. Each scheduled operation is guarded by a process lock so overlapping work is skipped safely — see [src/scheduler/workflows.py](src/scheduler/workflows.py).
 
 ---
 
@@ -70,6 +70,7 @@ SMIO/
       models.py              # Email SQLAlchemy model
   scripts/
     run_workflow.py          # Cron entry point: fetch -> process -> summary -> retrain
+    backfill_summary_snapshots.py # Backfill snapshots from existing email history
     bootstrap_eval_holdout.py # One-time: carve the initial retrain eval hold-out
     train_distilbert_optuna.py, train_ner.py, ...  # Standalone training/eval scripts
   models/
@@ -168,11 +169,27 @@ The API exposes these scheduler/action endpoints:
 |---|---|---|---|
 | POST | `/jobs/five-minute` | Every 5 minutes | Fetch, process instruction mails, classify and file new mail |
 | POST | `/jobs/daily` | Daily | Gather, send, then retrain |
-| POST | `/jobs/daily/gather` | Manual | Gather and store one summary date |
+| POST | `/jobs/daily/gather` | Manual | Gather and store one summary date (`force=true` can overwrite an older snapshot) |
 | POST | `/jobs/daily/send` | Manual | Send the stored summary for one date |
 | POST | `/jobs/daily/retrain` | Manual | Run retraining if the correction threshold is met |
 
-Deploy the image from source. Keep both the Cloud Run instance count and request
+The repository includes [deploy.ps1](deploy.ps1), which authenticates with Google
+Cloud, builds and pushes the Docker image to Artifact Registry, grants the runtime
+service account access to Secret Manager and GCS, and deploys Cloud Run with the
+required single-instance SQLite settings. Run it from the repository root after
+starting Docker Desktop:
+
+```powershell
+.\deploy.ps1
+```
+
+Use `-IncludeGmailSecrets` when the daily summary should be sent through Gmail.
+The script defaults to project `smio-509409`, region `europe-west3`, bucket
+`smio-example-artifacts`, and the `Europe/Berlin` summary timezone.
+Override these values with the script parameters when deploying to another
+environment.
+
+For a manual source deployment, keep both the Cloud Run instance count and request
 concurrency at one while SQLite is stored in GCS:
 
 ```bash
@@ -213,6 +230,21 @@ Cloud Scheduler's HTTP deadline is limited to 30 minutes. If retraining can exce
 that, move the retraining part of the daily routine to a Cloud Run Job; do not let a
 long training request be retried while it is still running.
 
+### Backfill existing summaries
+
+After enabling persistent snapshots on an existing database, create snapshots from
+historical processed mail with:
+
+```powershell
+.\smio\Scripts\python.exe .\scripts\backfill_summary_snapshots.py `
+  --db-path .\smio.db `
+  --start 2026-09-01
+```
+
+The script uses the configured logical-day boundary and never enables GCS, so the
+local database copy cannot upload changes to the production bucket. Use `--end`
+to limit the range and `--force` to overwrite existing historical snapshots.
+
 ### 5. Run the full workflow once (fetch, process, summarize, retrain)
 ```bash
 python -m scripts.run_workflow
@@ -242,11 +274,11 @@ GMAIL_CLIENT_SECRET=your-oauth-client-secret
 GMAIL_REFRESH_TOKEN=your-oauth-refresh-token
 GMAIL_TO_ADDRESS=your_email@example.com
 # Gmail must authorize the configured sender address.
-GMAIL_FROM_ADDRESS=cooljoe67@gmail.com
+GMAIL_FROM_ADDRESS=sender@example.com
 GMAIL_FROM_NAME=Smio, der Mail Organizer
 
 # Personalization
-USER_FIRST_NAME=Marcus
+USER_FIRST_NAME=Example User
 
 # Optional: persist the deployed classifier and SQLite database in GCS.
 # Cloud Run uses its service account through Application Default Credentials.
@@ -261,14 +293,14 @@ later without rebuilding the period.
 
 To configure Gmail delivery, enable the Gmail API in the Google Cloud project, then
 create an OAuth consent screen and a **Desktop app** OAuth client for
-`cooljoe67@gmail.com`. Download that client's JSON file locally and run:
+`sender@example.com`. Download that client's JSON file locally and run:
 
 ```bash
 python -m pip install -r requirements.txt
 python scripts/create_gmail_refresh_token.py --client-secrets path/to/client_secret.json
 ```
 
-The browser authorization must use `cooljoe67@gmail.com`. Store the resulting refresh
+The browser authorization must use `sender@example.com`. Store the resulting refresh
 token, client ID, and client secret in Secret Manager as `gmail-refresh-token`,
 `gmail-client-id`, and `gmail-client-secret`. Configure `GMAIL_TO_ADDRESS` to the
 1&1 recipient address. Do not add the downloaded OAuth client JSON or refresh token
@@ -290,7 +322,7 @@ GCS continues to store the deployed classifier model.
 
 1. **Sync & fetch** — reconcile known messages across IMAP folders, fetch new INBOX mails ([src/api/utils/imap_client.py](src/api/utils/imap_client.py)).
 2. **Process** — classify each new mail, run NER for `delivery` mails, move it into its category folder, apply retention-based cleanup ([src/api/utils/inbox_processor.py](src/api/utils/inbox_processor.py)).
-3. **Summarize** — build and email a plain-language digest of what happened since the last summary.
+3. **Summarize** — gather and persist a logical-day snapshot, then send its plain-language digest.
 4. **Retrain (if due)** — once enough manual corrections have accumulated, fine-tune the classifier using a replay buffer (90% old data / 10% new corrections per class) and promote it only if it beats the deployed model's F1 on a fixed hold-out set.
 
 ---
@@ -303,7 +335,7 @@ GCS continues to store the deployed classifier model.
 | GET | `/imap/sync` | Reconcile known messages across all classification folders |
 | POST | `/inbox/process_unprocessed` | Classify + extract entities + move all unprocessed mails |
 | POST | `/inbox/undo_last_processing` | Revert the last processing batch, restore mails to INBOX |
-| GET | `/summary/daily?summary_date=YYYY-MM-DD` | Return a stored summary or generate a preview |
+| GET | `/summary/daily?summary_date=YYYY-MM-DD` | Return a stored snapshot or generate a preview |
 | POST | `/jobs/five-minute` | Cloud Scheduler: fetch and process new mail |
 | POST | `/jobs/daily` | Cloud Scheduler: gather, send, and retrain |
 | POST | `/jobs/daily/gather?summary_date=YYYY-MM-DD` | Store one fixed-period summary |
@@ -319,10 +351,10 @@ GCS continues to store the deployed classifier model.
 - Folder-rule-based automated actions with retention cleanup
 - Manual-correction tracking + replay-buffer retraining with a fixed eval hold-out
 - Daily summary email
+- Persistent summary snapshots with gather/send/retrain job controls
+- Cloud Run deployment script with Artifact Registry and Secret Manager setup
 
 **Next**
-- Deployment target (Raspberry Pi / Oracle Cloud Free Tier under evaluation)
-- Dockerized deployment
 - Web dashboard
 
 **Later**
