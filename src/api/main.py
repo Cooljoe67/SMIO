@@ -3,13 +3,14 @@ import logging
 from fastapi import FastAPI
 from .routers import imap, inbox, jobs, summary
 
-from src.db.database import engine, ensure_email_columns
+from src.db.database import engine, ensure_email_columns, ensure_summary_snapshot_columns
 from src.db.models import Base
 
 logging.basicConfig(level=logging.INFO)
 
 Base.metadata.create_all(bind=engine)
 ensure_email_columns()
+ensure_summary_snapshot_columns()
 
 
 app = FastAPI(

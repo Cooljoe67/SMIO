@@ -3,13 +3,20 @@
 import logging
 from threading import Lock
 
-from src.ai.daily_summary import build_daily_summary, persist_summary_period_end
+import json
+
+from src.ai.daily_summary import (
+    gather_daily_summary,
+    mark_summary_sent,
+    stored_daily_summary,
+)
 from src.ai.retrain import retrain_if_due
 from src.api.utils.command_processor import process_instruction_mails
 from src.api.utils.imap_client import fetch_inbox
 from src.api.utils.inbox_processor import process_unprocessed_emails
 from src.api.utils.mailer import send_summary_email
 from src.db.database import SessionLocal
+from src.db.models import SummarySnapshot
 
 logger = logging.getLogger(__name__)
 _workflow_lock = Lock()
@@ -52,25 +59,78 @@ def run_five_minute_workflow():
     return _run_exclusively("five-minute workflow", routine)
 
 
-def run_daily_workflow():
-    """Send the daily digest and retrain the classifier when corrections are due."""
+def _gather_summary(summary_date=None, force=False):
+    db = SessionLocal()
+    try:
+        return gather_daily_summary(db, summary_date, force=force)
+    finally:
+        db.close()
+
+
+def _send_summary(summary_date=None):
+    db = SessionLocal()
+    try:
+        summary = stored_daily_summary(db, summary_date)
+        if summary is None:
+            raise ValueError("No stored summary exists for this date; gather it first")
+        sent = send_summary_email(
+            summary["message"],
+            html_body=summary.get("html_message"),
+        )
+        stored = mark_summary_sent(db, summary["summary_date"], sent)
+        return {"summary": stored, "summary_sent": sent}
+    finally:
+        db.close()
+
+
+def _run_retraining(summary_date=None):
+    db = SessionLocal()
+    try:
+        result = retrain_if_due(db)
+        if summary_date is not None:
+            snapshot = db.query(SummarySnapshot).filter(
+                SummarySnapshot.summary_date == str(summary_date)
+            ).one_or_none()
+            if snapshot is not None:
+                snapshot.retrain_run_id = result.get("run_id")
+                snapshot.retrain_result_json = json.dumps(result, default=str)
+                db.commit()
+        return result
+    finally:
+        db.close()
+
+
+def run_gather_summary(summary_date=None, force=False):
+    return _run_exclusively(
+        "summary gathering",
+        lambda: _gather_summary(summary_date, force=force),
+    )
+
+
+def run_send_summary(summary_date=None):
+    return _run_exclusively(
+        "summary sending",
+        lambda: _send_summary(summary_date),
+    )
+
+
+def run_retraining(summary_date=None):
+    return _run_exclusively(
+        "retraining",
+        lambda: _run_retraining(summary_date),
+    )
+
+
+def run_daily_workflow(summary_date=None):
+    """Gather, send, then retrain for one logical summary day."""
     def routine():
-        db = SessionLocal()
-        try:
-            summary = build_daily_summary(db, persist=False)
-            sent = send_summary_email(
-                summary["message"],
-                html_body=summary.get("html_message"),
-            )
-            if sent:
-                persist_summary_period_end(summary["period_end"])
-            retrain_result = retrain_if_due(db)
-        finally:
-            db.close()
+        summary = _gather_summary(summary_date)
+        send_result = _send_summary(summary["summary_date"])
+        retrain_result = _run_retraining(summary["summary_date"])
 
         return {
-            "summary": summary,
-            "summary_sent": sent,
+            "gather": summary,
+            "send": send_result,
             "retrain": retrain_result,
         }
 
