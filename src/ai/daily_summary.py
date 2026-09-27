@@ -3,19 +3,21 @@
 import html
 import json
 import os
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from sqlalchemy import func
 
 from src.api.utils.folder_rules import CLASSIFICATION_FOLDERS
 from src.api.utils.settings import app_settings
-from src.db.models import Email
-from src.storage import gcs
+from src.db.models import Email, SummarySnapshot
 
-STATE_FILE = Path("./data/summary_state.json")
-STATE_GCS_OBJECT = "state/summary_state.json"
 RETRAIN_LOG_FILE = Path("./models/retrain_log.jsonl")
 RETRAIN_STATE_FILE = Path("./models/retrain_state.json")
 RETRAIN_MIN_CORRECTIONS = int(os.getenv("SMIO_MIN_CORRECTIONS", "20"))
+SUMMARY_START_HOUR = int(os.getenv("SMIO_SUMMARY_START_HOUR", "8"))
+SUMMARY_TIMEZONE = os.getenv("SMIO_SUMMARY_TIMEZONE", "Europe/Berlin")
 
 
 def _load_json(path):
@@ -60,9 +62,10 @@ def _format_datetime(value):
         return "not available"
     if isinstance(value, str):
         value = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if value.tzinfo is not None:
-        value = value.astimezone(timezone.utc).replace(tzinfo=None)
-    today = datetime.now(timezone.utc).replace(tzinfo=None).date()
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    value = value.astimezone(_summary_zone())
+    today = datetime.now(_summary_zone()).date()
     if value.date() == today:
         prefix = "Today"
     elif value.date() == today - timedelta(days=1):
@@ -72,9 +75,41 @@ def _format_datetime(value):
     return f"{prefix} {value.strftime('%H:%M')}"
 
 
-def _delivery_snapshot(emails, period_start):
+def _summary_zone():
+    try:
+        return ZoneInfo(SUMMARY_TIMEZONE)
+    except Exception:
+        return timezone.utc
+
+
+def _summary_date(value=None):
+    if value is None:
+        return datetime.now(_summary_zone()).date() - timedelta(days=1)
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    return date.fromisoformat(str(value))
+
+
+def summary_period(summary_date=None):
+    """Return logical date plus UTC-naive DB boundaries for a summary period."""
+    logical_date = _summary_date(summary_date)
+    zone = _summary_zone()
+    local_start = datetime.combine(
+        logical_date,
+        time(hour=SUMMARY_START_HOUR),
+        tzinfo=zone,
+    )
+    local_end = local_start + timedelta(days=1)
+    return (
+        logical_date,
+        local_start.astimezone(timezone.utc).replace(tzinfo=None),
+        local_end.astimezone(timezone.utc).replace(tzinfo=None),
+    )
+
+
+def _delivery_snapshot(emails, period_start, reference_date):
     deliveries = [email for email in emails if email.classification == "delivery"]
-    today = date.today()
+    today = reference_date
     upcoming = []
     delivered_since_summary = []
     status_counts = {}
@@ -122,44 +157,17 @@ def _retraining_snapshot():
     }
 
 
-def _load_period_start():
-    if gcs.enabled():
-        gcs.download_file(STATE_GCS_OBJECT, STATE_FILE)
-    if STATE_FILE.exists():
-        state = json.loads(STATE_FILE.read_text())
-        last_summary_at = state.get("last_summary_at")
-        if last_summary_at:
-            parsed = datetime.fromisoformat(last_summary_at)
-            if parsed.tzinfo is not None:
-                parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
-            return parsed
-    # First run ever: fall back to the start of today.
-    return datetime.now(timezone.utc).replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
-
-
-def _save_period_end(timestamp):
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps({"last_summary_at": timestamp.isoformat()}))
-    gcs.upload_file(STATE_FILE, STATE_GCS_OBJECT)
-
-
-def persist_summary_period_end(timestamp):
-    """Advance the summary period after its scheduled delivery succeeds."""
-    _save_period_end(datetime.fromisoformat(timestamp))
-
-
-def build_daily_summary(db, persist=True):
-    """Build the digest since the last summary.
-
-    persist=False builds an on-demand summary (e.g. requested via instruction mail)
-    without moving the period start used by the next scheduled summary.
-    """
-    period_start = _load_period_start()
-    period_end = datetime.now(timezone.utc).replace(tzinfo=None)
+def build_daily_summary(db, summary_date=None, persist=False):
+    """Build a summary for one logical day, defaulting to yesterday."""
+    logical_date, period_start, period_end = summary_period(summary_date)
 
     emails = (
         db.query(Email)
-        .filter(Email.processed_at.isnot(None), Email.processed_at >= period_start)
+        .filter(
+            Email.processed_at.isnot(None),
+            Email.processed_at >= period_start,
+            Email.processed_at < period_end,
+        )
         .all()
     )
 
@@ -203,13 +211,15 @@ def build_daily_summary(db, persist=True):
         if email.true_label and email.classification_source == "imap_folder"
     )
     retraining = _retraining_snapshot()
-    deliveries = _delivery_snapshot(all_emails, period_start)
+    deliveries = _delivery_snapshot(emails, period_start, logical_date)
+    retrain_due = pending_corrections >= RETRAIN_MIN_CORRECTIONS
     db_snapshot = {
         "total_entries": len(all_emails),
         "processed_entries": sum(1 for email in all_emails if email.processed_at),
         "pending_corrections": pending_corrections,
         "corrections": correction_count,
         "correction_threshold": RETRAIN_MIN_CORRECTIONS,
+        "retrain_due": retrain_due,
     }
 
     lines = [
@@ -220,7 +230,8 @@ def build_daily_summary(db, persist=True):
         "Mailbox",
         f"- Database entries: {db_snapshot['total_entries']}",
         f"- Corrections: {correction_count} ({pending_corrections}/"
-        f"{RETRAIN_MIN_CORRECTIONS} pending for retraining)",
+        f"{RETRAIN_MIN_CORRECTIONS} pending for retraining)"
+        + (" - RETRAINING DUE" if retrain_due else ""),
     ]
     if other_senders:
         lines.append(f"- Other senders: {', '.join(other_senders)}")
@@ -256,10 +267,8 @@ def build_daily_summary(db, persist=True):
             f"F1 {metrics.get('f1_macro', metrics.get('new_f1', 'n/a'))}"
         )
 
-    if persist:
-        _save_period_end(period_end)
-
     summary = {
+        "summary_date": logical_date.isoformat(),
         "message": "\n".join(lines),
         "period_start": period_start.isoformat(),
         "period_end": period_end.isoformat(),
@@ -274,6 +283,88 @@ def build_daily_summary(db, persist=True):
     }
     summary["html_message"] = _format_html_summary(summary)
     return summary
+
+
+def _metric(metrics, primary_key, fallback_key):
+    return metrics.get(primary_key, metrics.get(fallback_key)) if metrics else None
+
+
+def gather_daily_summary(db, summary_date=None, force=False):
+    """Build and persist the snapshot for one logical day.
+
+    Only the most recently stored summary date may be silently re-gathered
+    (e.g. re-running the daily job soon after it already ran). Overwriting an
+    older, already-completed snapshot requires force=True.
+    """
+    summary = build_daily_summary(db, summary_date=summary_date)
+    existing = db.query(SummarySnapshot).filter(
+        SummarySnapshot.summary_date == summary["summary_date"]
+    ).one_or_none()
+    if existing is not None and not force:
+        latest_date = db.query(func.max(SummarySnapshot.summary_date)).scalar()
+        if summary["summary_date"] != latest_date:
+            raise ValueError(
+                f"Summary snapshot for {summary['summary_date']} already exists and is "
+                "not the latest stored summary; pass force=True to overwrite it."
+            )
+
+    snapshot = existing or SummarySnapshot(summary_date=summary["summary_date"])
+    if existing is None:
+        db.add(snapshot)
+    snapshot.period_start = datetime.fromisoformat(summary["period_start"])
+    snapshot.period_end = datetime.fromisoformat(summary["period_end"])
+    snapshot.gathered_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    snapshot.data_json = json.dumps(summary, default=str)
+    snapshot.message = summary["message"]
+    snapshot.html_message = summary["html_message"]
+    snapshot.retrain_due = summary["db"]["retrain_due"]
+    snapshot.send_status = snapshot.send_status or "not_sent"
+
+    metrics = summary["retraining"]["last_metrics"]
+    snapshot.total_entries = summary["db"]["total_entries"]
+    snapshot.processed_entries = summary["db"]["processed_entries"]
+    snapshot.correction_count = summary["db"]["corrections"]
+    snapshot.pending_corrections = summary["db"]["pending_corrections"]
+    snapshot.correction_threshold = summary["db"]["correction_threshold"]
+    snapshot.new_count_total = sum(summary["new_counts"].values())
+    snapshot.unread_count_total = sum(summary["unread_counts"].values())
+    snapshot.removed_count_total = sum(summary["removed_counts"].values())
+    snapshot.retrain_last_run_at = summary["retraining"]["last_run_at"]
+    snapshot.retrain_last_promoted_at = summary["retraining"]["last_promoted_at"]
+    snapshot.retrain_accuracy = _metric(metrics, "accuracy", "new_accuracy")
+    snapshot.retrain_recall = _metric(metrics, "recall_macro", "new_recall_macro")
+    snapshot.retrain_f1 = _metric(metrics, "f1_macro", "new_f1")
+
+    db.commit()
+    return summary
+
+
+def stored_daily_summary(db, summary_date=None):
+    logical_date = _summary_date(summary_date)
+    snapshot = db.query(SummarySnapshot).filter(
+        SummarySnapshot.summary_date == logical_date.isoformat()
+    ).one_or_none()
+    if snapshot is None:
+        return None
+    summary = json.loads(snapshot.data_json)
+    summary["sent_at"] = snapshot.sent_at.isoformat() if snapshot.sent_at else None
+    summary["send_status"] = snapshot.send_status
+    summary["retrain_result"] = (
+        json.loads(snapshot.retrain_result_json)
+        if snapshot.retrain_result_json else None
+    )
+    return summary
+
+
+def mark_summary_sent(db, summary_date, sent):
+    logical_date = _summary_date(summary_date)
+    snapshot = db.query(SummarySnapshot).filter(
+        SummarySnapshot.summary_date == logical_date.isoformat()
+    ).one()
+    snapshot.send_status = "sent" if sent else "failed"
+    snapshot.sent_at = datetime.now(timezone.utc).replace(tzinfo=None) if sent else None
+    db.commit()
+    return stored_daily_summary(db, logical_date)
 
 
 def _format_html_summary(summary):
@@ -340,6 +431,7 @@ def _format_html_summary(summary):
 <h2>Mailbox</h2>
 <p><b>{number(summary['db']['total_entries'])}</b> database entries ·
 <b>{number(summary['db']['pending_corrections'])}/{number(summary['db']['correction_threshold'])}</b> pending corrections</p>
+{'<p style="color:#b54708"><b>Retraining is due.</b></p>' if summary['db']['retrain_due'] else ''}
 <h2>Categories</h2>
 <table style="width:100%;border-collapse:collapse"><tr><th align="left">Category</th><th align="left">New</th><th align="left">Unread</th><th align="left">Removed</th></tr>{''.join(categories)}</table>
 <div style="margin:18px 0">{''.join(bars)}</div>

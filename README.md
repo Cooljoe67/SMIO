@@ -156,12 +156,21 @@ git push
 ```
 
 ### Cloud Run and Cloud Scheduler
-The API exposes two scheduler endpoints:
+The summary uses a logical day from `08:00` to the next day `08:00` in
+`Europe/Berlin`. The default start hour and timezone can be changed with
+`SMIO_SUMMARY_START_HOUR` and `SMIO_SUMMARY_TIMEZONE`. The scheduled daily job
+runs at the same configured start time and stores the gathered data in the
+`summary_snapshots` database table before sending and retraining.
+
+The API exposes these scheduler/action endpoints:
 
 | Method | Path | Schedule | Work |
 |---|---|---|---|
 | POST | `/jobs/five-minute` | Every 5 minutes | Fetch, process instruction mails, classify and file new mail |
-| POST | `/jobs/daily` | Daily | Send the daily summary and retrain if enough corrections exist |
+| POST | `/jobs/daily` | Daily | Gather, send, then retrain |
+| POST | `/jobs/daily/gather` | Manual | Gather and store one summary date |
+| POST | `/jobs/daily/send` | Manual | Send the stored summary for one date |
+| POST | `/jobs/daily/retrain` | Manual | Run retraining if the correction threshold is met |
 
 Deploy the image from source. Keep both the Cloud Run instance count and request
 concurrency at one while SQLite is stored in GCS:
@@ -246,8 +255,9 @@ GCS_CLASSIFIER_MODEL_PREFIX=models/distilbert_deployed
 GCS_DATABASE_OBJECT=databases/smio.db
 ```
 
-When the Gmail OAuth settings are absent, summary delivery is skipped. The daily
-summary period is only advanced after Gmail accepts the message.
+When the Gmail OAuth settings are absent, summary delivery is skipped. The
+summary data is still stored in `summary_snapshots`, so sending can be retried
+later without rebuilding the period.
 
 To configure Gmail delivery, enable the Gmail API in the Google Cloud project, then
 create an OAuth consent screen and a **Desktop app** OAuth client for
@@ -293,9 +303,12 @@ GCS continues to store the deployed classifier model.
 | GET | `/imap/sync` | Reconcile known messages across all classification folders |
 | POST | `/inbox/process_unprocessed` | Classify + extract entities + move all unprocessed mails |
 | POST | `/inbox/undo_last_processing` | Revert the last processing batch, restore mails to INBOX |
-| GET | `/summary/daily` | Generate (and return) the daily digest text |
+| GET | `/summary/daily?summary_date=YYYY-MM-DD` | Return a stored summary or generate a preview |
 | POST | `/jobs/five-minute` | Cloud Scheduler: fetch and process new mail |
-| POST | `/jobs/daily` | Cloud Scheduler: send daily summary and retrain |
+| POST | `/jobs/daily` | Cloud Scheduler: gather, send, and retrain |
+| POST | `/jobs/daily/gather?summary_date=YYYY-MM-DD` | Store one fixed-period summary |
+| POST | `/jobs/daily/send?summary_date=YYYY-MM-DD` | Send a stored summary |
+| POST | `/jobs/daily/retrain?summary_date=YYYY-MM-DD` | Run retraining for the current DB state |
 
 ---
 

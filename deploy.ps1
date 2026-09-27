@@ -5,6 +5,8 @@ param(
     [string]$ServiceName = "smio",
     [string]$Repository = "smio",
     [string]$Memory = "4Gi",
+    [int]$SummaryStartHour = 8,
+    [string]$SummaryTimezone = "Europe/Berlin",
     [string]$GcsBucket = "smio-marcus-my-gcp-project-artifacts",
     [string]$GcsModelPrefix = "models/distilbert_deployed",
     [string]$GcsDatabaseObject = "databases/smio.db",
@@ -148,7 +150,7 @@ $deployArguments = @(
     "--timeout=3600",
     "--memory=$Memory",
     "--service-account=$RuntimeServiceAccount",
-    "--set-env-vars=GCS_BUCKET=$GcsBucket,GCS_CLASSIFIER_MODEL_PREFIX=$GcsModelPrefix,GCS_DATABASE_OBJECT=$GcsDatabaseObject",
+    "--set-env-vars=GCS_BUCKET=$GcsBucket,GCS_CLASSIFIER_MODEL_PREFIX=$GcsModelPrefix,GCS_DATABASE_OBJECT=$GcsDatabaseObject,SMIO_SUMMARY_START_HOUR=$SummaryStartHour,SMIO_SUMMARY_TIMEZONE=$SummaryTimezone",
     "--set-secrets=$($secretBindings -join ',')"
 )
 Invoke-Gcloud $deployArguments

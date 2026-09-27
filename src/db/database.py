@@ -90,6 +90,36 @@ def ensure_email_columns():
     persist_database()
 
 
+def ensure_summary_snapshot_columns():
+    required_columns = {
+        "total_entries": "INTEGER",
+        "processed_entries": "INTEGER",
+        "correction_count": "INTEGER",
+        "pending_corrections": "INTEGER",
+        "correction_threshold": "INTEGER",
+        "new_count_total": "INTEGER",
+        "unread_count_total": "INTEGER",
+        "removed_count_total": "INTEGER",
+        "retrain_last_run_at": "TEXT",
+        "retrain_last_promoted_at": "TEXT",
+        "retrain_accuracy": "TEXT",
+        "retrain_recall": "TEXT",
+        "retrain_f1": "TEXT",
+    }
+    if "summary_snapshots" not in inspect(engine).get_table_names():
+        return
+    existing_columns = {
+        column["name"] for column in inspect(engine).get_columns("summary_snapshots")
+    }
+    with engine.begin() as connection:
+        for column_name, column_type in required_columns.items():
+            if column_name not in existing_columns:
+                connection.execute(
+                    text(f"ALTER TABLE summary_snapshots ADD COLUMN {column_name} {column_type}")
+                )
+    persist_database()
+
+
 def get_db():
     db = SessionLocal()
     try:
