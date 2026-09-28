@@ -9,18 +9,22 @@ FOLDER_RULES = {
     "delivery": {
         "folder": "INBOX/delivery",
         "retention_days": None,
+        "retention_days_unread": 20,
     },
     "tech": {
         "folder": "INBOX/tech",
         "retention_days": 1,
+        "retention_days_unread": 20,
     },
     "social": {
         "folder": "INBOX/social",
         "retention_days": 5,
+        "retention_days_unread": 20,
     },
     "commercial": {
         "folder": "INBOX/commercial",
         "retention_days": 10,
+        "retention_days_unread": 20,
     },
 }
 

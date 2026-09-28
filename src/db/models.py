@@ -58,6 +58,7 @@ class Email(Base):
 
     # Permanently reserved for evaluation; never used for training.
     is_eval_holdout = Column(Boolean, default=False, nullable=False)
+    is_training_data = Column(Boolean, default=False, nullable=False)
 
 
 class SummarySnapshot(Base):

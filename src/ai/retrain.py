@@ -298,7 +298,7 @@ def retrain_if_due(db, min_corrections=MIN_CORRECTIONS):
         "last_run_id": run_id,
         "last_f1": new_metrics["f1_macro"] if promoted else state.get("last_f1"),
         "last_run_at": timestamp,
-        "last_metrics": new_metrics if promoted else state.get("last_metrics", baseline_metrics),
+        "last_metrics": new_metrics,
     })
     if promoted:
         state["last_promoted_at"] = timestamp

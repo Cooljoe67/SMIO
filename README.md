@@ -15,12 +15,16 @@ SMIO connects to your mailbox via IMAP, classifies incoming mails with a fine-tu
   For mails classified as `delivery`, extracts order IDs, tracking numbers, carrier, item name, and delivery status/date using a custom token-classification model plus regex/rule fallbacks ([src/ai/ner.py](src/ai/ner.py), [src/ai/email_metadata.py](src/ai/email_metadata.py)). Includes special-cased handling for Amazon sender addresses.
 
 - **Automated inbox actions**
-  - Moves classified mails into per-category IMAP folders with configurable retention (auto-cleanup of read mails after N days) — see [src/api/utils/folder_rules.py](src/api/utils/folder_rules.py).
+  - Moves classified mails into per-category IMAP folders. Read mail follows each folder's configured retention; unread mail is moved to `Papierkorb` after 20 days. Read delivery mail has no expiry by default — see [src/api/utils/folder_rules.py](src/api/utils/folder_rules.py).
   - Detects manual corrections: if you move a mail to a different folder yourself, SMIO records that as the ground-truth label (`true_label`) for future retraining.
+  - Leaves SMIO-generated mail in `INBOX` without classification or folder routing.
   - `undo_last_processing` reverts the most recent processing batch and moves mails back to `INBOX`.
 
 - **Persistent daily summary snapshots**
-  Builds a logical-day digest from `08:00` to `08:00` in the configured timezone, stores the message and queryable metrics in the `summary_snapshots` table, and can send the stored snapshot by email. The snapshot includes category counts, unread and retention-removal counts, delivery details, and retraining status — see [src/ai/daily_summary.py](src/ai/daily_summary.py).
+  Builds a logical-day digest from `08:00` to `08:00` in the configured timezone, stores the message and queryable metrics in the `summary_snapshots` table, and can send the stored snapshot by email. Human-readable dates use `DD/MM/YYYY`; tagged seed training/evaluation records are excluded from mailbox totals while remaining available for retraining. Retraining history includes unpromoted candidate metrics — see [src/ai/daily_summary.py](src/ai/daily_summary.py).
+
+- **Email commands**
+  Reply from the configured mailbox to a summary using its reply subject (for example, `AW: SMIO Daily Summary`) or use the fallback subject `SMIO Command`. Put `UNDO`, `RETRAIN`, `RELOAD MODEL`, or `SUMMARY` on the first non-empty body line; optionally prefix it with `SMIO:`. The five-minute workflow handles these commands and moves handled command messages to `Papierkorb`.
 
 - **Self-improving classifier (replay-buffer retraining)**
   Once enough manual corrections accumulate (default: 20, configurable), SMIO fine-tunes the deployed model on a mix of the new corrections and a random sample of existing labeled data per class (90/10 replay ratio), evaluates the candidate against the currently deployed model on a fixed, continuously-growing hold-out set, and only promotes the new model if its macro-F1 is at least as good — see [src/ai/retrain.py](src/ai/retrain.py).
@@ -69,9 +73,12 @@ SMIO/
       database.py           # SQLite engine, session, schema migration helper
       models.py              # Email SQLAlchemy model
   scripts/
+    deploy.ps1               # Cloud Run deployment
     run_workflow.py          # Cron entry point: fetch -> process -> summary -> retrain
     backfill_summary_snapshots.py # Backfill snapshots from existing email history
     bootstrap_eval_holdout.py # One-time: carve the initial retrain eval hold-out
+    sync_database_with_gcs.py # Download/edit/upload the GCS-backed SQLite database
+    create_gmail_refresh_token.py # Create Gmail API OAuth credentials
     train_distilbert_optuna.py, train_ner.py, ...  # Standalone training/eval scripts
   models/
     distilbert_deployed/     # Currently deployed classifier
@@ -173,22 +180,6 @@ The API exposes these scheduler/action endpoints:
 | POST | `/jobs/daily/send` | Manual | Send the stored summary for one date |
 | POST | `/jobs/daily/retrain` | Manual | Run retraining if the correction threshold is met |
 
-The repository includes [deploy.ps1](deploy.ps1), which authenticates with Google
-Cloud, builds and pushes the Docker image to Artifact Registry, grants the runtime
-service account access to Secret Manager and GCS, and deploys Cloud Run with the
-required single-instance SQLite settings. Run it from the repository root after
-starting Docker Desktop:
-
-```powershell
-.\deploy.ps1
-```
-
-Use `-IncludeGmailSecrets` when the daily summary should be sent through Gmail.
-The script defaults to project `smio-509409`, region `europe-west3`, bucket
-`smio-example-artifacts`, and the `Europe/Berlin` summary timezone.
-Override these values with the script parameters when deploying to another
-environment.
-
 For a manual source deployment, keep both the Cloud Run instance count and request
 concurrency at one while SQLite is stored in GCS:
 
@@ -230,6 +221,44 @@ Cloud Scheduler's HTTP deadline is limited to 30 minutes. If retraining can exce
 that, move the retraining part of the daily routine to a Cloud Run Job; do not let a
 long training request be retried while it is still running.
 
+## Scripts and Operations
+
+Run these commands from the repository root.
+
+### Deploy to Cloud Run
+
+[scripts/deploy.ps1](scripts/deploy.ps1) reuses an active Google Cloud SDK login
+(or prompts for login if needed), starts Docker Desktop if it is not running, and
+waits for the Docker engine before building and pushing the image to Artifact
+Registry. It grants the runtime service account access to Secret Manager and GCS,
+then deploys Cloud Run with the required single-instance SQLite settings.
+
+```powershell
+.\scripts\deploy.ps1
+```
+
+Use `-IncludeGmailSecrets` when the daily summary should be sent through Gmail.
+The script defaults to project `smio-509409`, region `europe-west3`, bucket
+`smio-marcus-my-gcp-project-artifacts`, and the `Europe/Berlin` summary timezone.
+Override its parameters when deploying to another environment.
+
+### Edit the GCS-backed SQLite database
+
+Use the guarded sync utility to download the current database, edit the local
+copy, and optionally write changes back:
+
+```powershell
+.\smio\Scripts\python.exe .\scripts\sync_database_with_gcs.py
+```
+
+Full mode pauses the `smio-five-minute` Cloud Scheduler job, downloads and
+integrity-checks the database, then waits while you edit `smio.db`. After editing,
+press Enter and type uppercase `Y` to upload. If the database is unchanged, the
+upload is skipped. The job resumes automatically when the script exits if this
+run paused it. `--download-only` downloads and exits without pausing the job or
+offering write-back. Keep other SMIO processes that could write to the database
+stopped while editing.
+
 ### Backfill existing summaries
 
 After enabling persistent snapshots on an existing database, create snapshots from
@@ -245,15 +274,33 @@ The script uses the configured logical-day boundary and never enables GCS, so th
 local database copy cannot upload changes to the production bucket. Use `--end`
 to limit the range and `--force` to overwrite existing historical snapshots.
 
-### 5. Run the full workflow once (fetch, process, summarize, retrain)
+### Run the full workflow once
+
+Fetch, process, summarize, and retrain in one local run:
+
 ```bash
 python -m scripts.run_workflow
 ```
-For unattended operation, schedule this command (e.g. via Windows Task Scheduler). A lockfile (`tmp/workflow.lock`) prevents overlapping runs.
+For unattended operation, schedule this command (for example, via Windows Task
+Scheduler). A lockfile (`tmp/workflow.lock`) prevents overlapping runs.
 
-### 6. Bootstrap the retraining hold-out (once, before the first retrain)
+### Bootstrap the retraining hold-out
+
+Run once before the first retraining attempt:
+
 ```bash
 python -m scripts.bootstrap_eval_holdout
+```
+
+### Configure Gmail summary delivery
+
+Create a Gmail OAuth client and refresh token for the configured sender address.
+The helper script opens browser authorization and prints the values to store in
+the local environment or Secret Manager:
+
+```powershell
+.\smio\Scripts\python.exe .\scripts\create_gmail_refresh_token.py `
+  --client-secrets path/to/client_secret.json
 ```
 
 ---
@@ -267,6 +314,7 @@ Create a `.env` file in the project root:
 IMAP_HOST=imap.yourprovider.com
 IMAP_USER=your_email@example.com
 IMAP_PASSWORD=your_password
+# Summary emails use IMAP_USER as their Reply-To address.
 
 # Gmail API (optional — only needed to receive the daily summary email)
 GMAIL_CLIENT_ID=your-oauth-client-id
@@ -291,16 +339,11 @@ When the Gmail OAuth settings are absent, summary delivery is skipped. The
 summary data is still stored in `summary_snapshots`, so sending can be retried
 later without rebuilding the period.
 
-To configure Gmail delivery, enable the Gmail API in the Google Cloud project, then
-create an OAuth consent screen and a **Desktop app** OAuth client for
-`sender@example.com`. Download that client's JSON file locally and run:
-
-```bash
-python -m pip install -r requirements.txt
-python scripts/create_gmail_refresh_token.py --client-secrets path/to/client_secret.json
-```
-
-The browser authorization must use `sender@example.com`. Store the resulting refresh
+To configure Gmail delivery, enable the Gmail API in the Google Cloud project,
+then create an OAuth consent screen and a **Desktop app** OAuth client for
+`sender@example.com`. Download that client's JSON file locally. Follow the
+**Configure Gmail summary delivery** instructions in Scripts and Operations. The
+browser authorization must use `sender@example.com`. Store the resulting refresh
 token, client ID, and client secret in Secret Manager as `gmail-refresh-token`,
 `gmail-client-id`, and `gmail-client-secret`. Configure `GMAIL_TO_ADDRESS` to the
 1&1 recipient address. Do not add the downloaded OAuth client JSON or refresh token

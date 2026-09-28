@@ -65,14 +65,11 @@ def _format_datetime(value):
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     value = value.astimezone(_summary_zone())
-    today = datetime.now(_summary_zone()).date()
-    if value.date() == today:
-        prefix = "Today"
-    elif value.date() == today - timedelta(days=1):
-        prefix = "Yesterday"
-    else:
-        return value.strftime("%d/%m/%Y %H:%M")
-    return f"{prefix} {value.strftime('%H:%M')}"
+    return value.strftime("%d/%m/%Y %H:%M")
+
+
+def _format_display_date(value):
+    return date.fromisoformat(str(value)).strftime("%d/%m/%Y")
 
 
 def _summary_zone():
@@ -105,6 +102,19 @@ def summary_period(summary_date=None):
         local_start.astimezone(timezone.utc).replace(tzinfo=None),
         local_end.astimezone(timezone.utc).replace(tzinfo=None),
     )
+
+
+def _email_command_help_lines():
+    return [
+        "",
+        "Email commands",
+        "Reply to this summary with one command on the first line; optionally prefix it with 'SMIO:'.",
+        "Use a summary reply subject (for example, AW: SMIO Daily Summary) or the fallback subject 'SMIO Command'.",
+        "- UNDO: restore the last processing batch to INBOX.",
+        "- RETRAIN: force a retraining attempt; an evaluation holdout is required.",
+        "- RELOAD MODEL: reload the deployed classifier.",
+        "- SUMMARY: send an on-demand summary.",
+    ]
 
 
 def _delivery_snapshot(emails, period_start, reference_date):
@@ -145,13 +155,13 @@ def _retraining_snapshot():
     latest = history[-1] if history else {}
     promoted = [entry for entry in history if entry.get("promoted")]
     return {
-        "last_run_at": state.get("last_run_at"),
+        "last_run_at": state.get("last_run_at") or latest.get("run_at"),
         "last_promoted_at": (
             state.get("last_promoted_at")
             or (promoted[-1].get("run_at") if promoted else None)
         ),
         "last_run_id": state.get("last_run_id"),
-        "last_metrics": state.get("last_metrics") or latest,
+        "last_metrics": latest or state.get("last_metrics"),
         "history": history[-10:],
         "promoted_runs": len(promoted),
     }
@@ -164,6 +174,7 @@ def build_daily_summary(db, summary_date=None, persist=False):
     emails = (
         db.query(Email)
         .filter(
+            Email.is_training_data.is_(False),
             Email.processed_at.isnot(None),
             Email.processed_at >= period_start,
             Email.processed_at < period_end,
@@ -171,7 +182,7 @@ def build_daily_summary(db, summary_date=None, persist=False):
         .all()
     )
 
-    all_emails = db.query(Email).all()
+    all_emails = db.query(Email).filter(Email.is_training_data.is_(False)).all()
 
     other_senders = sorted({
         email.sender for email in emails
@@ -249,7 +260,10 @@ def build_daily_summary(db, summary_date=None, persist=False):
     lines.extend(("", "Deliveries"))
     lines.append(f"- Due today: {deliveries['today_count']}")
     for item in deliveries["upcoming"][:5]:
-        lines.append(f"- {item['date']}: {item['item']} ({item['status']})")
+        lines.append(
+            f"- {_format_display_date(item['date'])}: "
+            f"{item['item']} ({item['status']})"
+        )
     if deliveries["delivered_since_summary"]:
         lines.append(
             "- Delivered since last summary: "
@@ -266,6 +280,7 @@ def build_daily_summary(db, summary_date=None, persist=False):
             f"recall {metrics.get('recall_macro', metrics.get('new_recall_macro', 'n/a'))}, "
             f"F1 {metrics.get('f1_macro', metrics.get('new_f1', 'n/a'))}"
         )
+    lines.extend(_email_command_help_lines())
 
     summary = {
         "summary_date": logical_date.isoformat(),
@@ -347,6 +362,30 @@ def stored_daily_summary(db, summary_date=None):
     if snapshot is None:
         return None
     summary = json.loads(snapshot.data_json)
+    summary["retraining"] = _retraining_snapshot()
+    message_lines = summary["message"].splitlines()
+    if "Model" in message_lines:
+        message_lines = message_lines[:message_lines.index("Model") + 1]
+    else:
+        message_lines.extend(("", "Model"))
+    retraining = summary["retraining"]
+    message_lines.append(
+        f"- Last retraining: {retraining['last_run_at'] or 'not available'}"
+    )
+    message_lines.append(
+        f"- Last promoted model: {retraining['last_promoted_at'] or 'not available'}"
+    )
+    metrics = retraining["last_metrics"]
+    if metrics:
+        message_lines.append(
+            "- Latest metrics: "
+            f"accuracy {metrics.get('accuracy', metrics.get('new_accuracy', 'n/a'))}, "
+            f"recall {metrics.get('recall_macro', metrics.get('new_recall_macro', 'n/a'))}, "
+            f"F1 {metrics.get('f1_macro', metrics.get('new_f1', 'n/a'))}"
+        )
+    message_lines.extend(_email_command_help_lines())
+    summary["message"] = "\n".join(message_lines)
+    summary["html_message"] = _format_html_summary(summary)
     summary["sent_at"] = snapshot.sent_at.isoformat() if snapshot.sent_at else None
     summary["send_status"] = snapshot.send_status
     summary["retrain_result"] = (
@@ -393,7 +432,7 @@ def _format_html_summary(summary):
     for item in summary["deliveries"]["upcoming"]:
         delivery_rows.append(
             "<tr>"
-            f"<td>{number(item['date'])}</td>"
+            f"<td>{number(_format_display_date(item['date']))}</td>"
             f"<td>{html.escape(item['item'])}</td>"
             f"<td>{html.escape(item['company'])}</td>"
             f"<td>{html.escape(item['status'])}</td>"
@@ -443,6 +482,13 @@ def _format_html_summary(summary):
 Last promoted model: {number(summary['retraining']['last_promoted_at'] or 'not available')}<br>{metric_text}</p>
 <h3 style="font-size:15px;color:#173f5f">Retraining history</h3>
 <table style="width:100%;border-collapse:collapse"><tr><th align="left">Run</th><th align="left">Holdout</th><th align="left">Accuracy</th><th align="left">Recall</th><th align="left">F1</th><th align="left">Status</th></tr>{''.join(history_rows) or '<tr><td colspan="6">No retraining runs found.</td></tr>'}</table>
+<h3 style="font-size:15px;color:#173f5f">Email commands</h3>
+<p>Reply to this summary with one command on the first line; optionally prefix it with <code>SMIO:</code>.<br>
+Use a summary reply subject (for example, <code>AW: SMIO Daily Summary</code>) or the fallback subject <code>SMIO Command</code>.</p>
+<ul><li><b>UNDO</b>: restore the last processing batch to INBOX.</li>
+<li><b>RETRAIN</b>: force a retraining attempt; an evaluation holdout is required.</li>
+<li><b>RELOAD MODEL</b>: reload the deployed classifier.</li>
+<li><b>SUMMARY</b>: send an on-demand summary.</li></ul>
 </div></div>
 <style>h2{{font-size:18px;margin:22px 0 10px;color:#173f5f}}td,th{{padding:8px 6px;border-bottom:1px solid #e5e9ed;font-size:14px}}.bar-row{{display:flex;align-items:center;gap:8px;margin:7px 0;font-size:13px}}.bar-row span{{width:90px}}.bar-track{{height:10px;background:#e6edf2;border-radius:5px;flex:1;overflow:hidden}}.bar{{height:100%;background:#3caea3;border-radius:5px}}</style>
 </body></html>"""

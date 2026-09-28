@@ -42,25 +42,68 @@ function Assert-Command {
 }
 
 function Wait-ForDocker {
+    $startupTimeoutSeconds = 180
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+
     while ($true) {
-        docker info *> $null
-        if ($LASTEXITCODE -eq 0) {
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            docker info *> $null
+            $dockerExitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+
+        if ($dockerExitCode -eq 0) {
             return
         }
 
-        Write-Host "Docker Desktop is not running. Start it, then press Enter to check again."
-        Read-Host "Press Enter when Docker Desktop is ready"
+        if ($timer.Elapsed.TotalSeconds -ge $startupTimeoutSeconds) {
+            throw "Docker Desktop did not become ready within $startupTimeoutSeconds seconds. Start it manually and rerun deploy.ps1."
+        }
+
+        Write-Host "Waiting for Docker Desktop to finish starting..."
+        Start-Sleep -Seconds 5
     }
+}
+
+function Start-DockerDesktop {
+    if (Get-Process -Name "Docker Desktop" -ErrorAction SilentlyContinue) {
+        return
+    }
+
+    $desktopPath = Join-Path $env:ProgramFiles "Docker\Docker\Docker Desktop.exe"
+    if (-not (Test-Path $desktopPath)) {
+        $desktopPath = Join-Path $env:LOCALAPPDATA "Programs\Docker\Docker\Docker Desktop.exe"
+    }
+    if (-not (Test-Path $desktopPath)) {
+        throw "Docker Desktop was not found in the standard install locations. Start it manually and rerun deploy.ps1."
+    }
+
+    Write-Host "Docker Desktop is not running. Starting it..."
+    Start-Process -FilePath $desktopPath
 }
 
 Assert-Command "docker"
 Assert-Command "gcloud"
 
-Write-Host "Starting Google Cloud login..."
-Invoke-Gcloud @("auth", "login")
+$ActiveGcloudAccount = (& gcloud auth list --filter=status:ACTIVE --format="value(account)" 2>$null | Out-String).Trim()
+if ($LASTEXITCODE -ne 0) {
+    throw "Could not check Google Cloud authentication status."
+}
+if ([string]::IsNullOrWhiteSpace($ActiveGcloudAccount)) {
+    Write-Host "No active Google Cloud login found. Starting Google Cloud login..."
+    Invoke-Gcloud @("auth", "login")
+}
+else {
+    Write-Host "Google Cloud SDK is already authenticated. Skipping login."
+}
 
 Invoke-Gcloud @("config", "set", "project", $ProjectId)
 
+Start-DockerDesktop
 Wait-ForDocker
 
 if ([string]::IsNullOrWhiteSpace($GcsBucket) -or $GcsBucket -eq "YOUR_BUCKET") {

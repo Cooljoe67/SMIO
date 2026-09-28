@@ -1,10 +1,8 @@
-"""Scans INBOX for self-sent instruction mails and executes the matching action.
+"""Scans INBOX for self-sent summary replies containing an instruction.
 
-Recognized subjects (case-insensitive, optional "SMIO:" prefix):
-  UNDO           -> revert the last processing batch
-  RETRAIN        -> force a retrain attempt regardless of pending-correction count
-  RELOAD MODEL   -> reload the deployed classifier from disk
-  SUMMARY        -> send an on-demand summary without resetting the scheduled period
+Accepted subjects are summary replies (for example, "AW: SMIO Daily Summary")
+or the fallback "SMIO Command". The command is the first non-empty body line,
+optionally prefixed with "SMIO:".
 
 Each matching mail is deleted (moved to trash) once handled, which doubles as
 the confirmation that it was received and processed.
@@ -28,15 +26,34 @@ from .settings import email_settings
 logger = logging.getLogger(__name__)
 
 # Only mails from the mailbox owner are honored; the From header is otherwise unauthenticated.
+_SUBJECT_REPLY_PREFIX = re.compile(r"^(?:aw|re|fw|fwd)\s*:\s*", re.IGNORECASE)
+_COMMAND_SUBJECTS = {
+    "smio daily summary",
+    "smio summary (on demand)",
+    "smio command",
+}
 _COMMAND_PATTERN = re.compile(
-    r"^\s*(?:smio\s*[:\-]?\s*)?(undo|retrain|reload model|summary)\s*$",
+    r"^\s*(?:smio\s*:\s*)?(undo|retrain|reload\s+model|summary)(?=$|\s)",
     re.IGNORECASE,
 )
 
 
-def _normalize_command(subject):
-    match = _COMMAND_PATTERN.match(subject or "")
-    return match.group(1).lower() if match else None
+def _normalize_command(subject, body):
+    normalized_subject = (subject or "").strip()
+    while True:
+        without_prefix = _SUBJECT_REPLY_PREFIX.sub("", normalized_subject, count=1)
+        if without_prefix == normalized_subject:
+            break
+        normalized_subject = without_prefix.strip()
+    if normalized_subject.casefold() not in _COMMAND_SUBJECTS:
+        return None
+
+    first_line = next(
+        (line.strip() for line in (body or "").splitlines() if line.strip()),
+        "",
+    )
+    match = _COMMAND_PATTERN.match(first_line)
+    return re.sub(r"\s+", " ", match.group(1)).casefold() if match else None
 
 
 def _run_command(db, command):
@@ -80,7 +97,7 @@ def process_instruction_mails():
         for msg in mailbox.fetch(mark_seen=False):
             if (msg.from_ or "").strip().lower() != owner:
                 continue
-            command = _normalize_command(msg.subject)
+            command = _normalize_command(msg.subject, msg.text)
             if command is not None:
                 matches.append((msg.uid, command))
 
