@@ -102,23 +102,29 @@ def _move_to_trash(mailbox, email):
     mailbox.folder.set("INBOX", readonly=False)
 
 
-def cleanup_expired_read_mails(db, mailbox):
+def cleanup_expired_mails(db, mailbox):
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     moved = 0
     skipped_unread = 0
     errors = []
 
-    for classification, rule in FOLDER_RULES.items():
+    for rule in FOLDER_RULES.values():
         retention_days = rule.get("retention_days")
+        retention_days_unread = rule.get("retention_days_unread")
         folder_name = rule["folder"]
-        if retention_days is None:
+        active_periods = [
+            days for days in (retention_days, retention_days_unread)
+            if days is not None
+        ]
+        if not active_periods:
             continue
 
-        cutoff = now - timedelta(days=retention_days)
+        candidate_cutoff = max(
+            now - timedelta(days=days) for days in active_periods
+        )
         candidates = db.query(Email).filter(
             Email.folder == folder_name,
-            Email.read_at.isnot(None),
-            Email.read_at <= cutoff,
+            Email.date <= candidate_cutoff,
         ).all()
 
         for email in candidates:
@@ -131,8 +137,14 @@ def cleanup_expired_read_mails(db, mailbox):
                     ),
                     None,
                 )
-                if current_message is None or not _is_seen(current_message):
-                    skipped_unread += 1
+                if current_message is None:
+                    continue
+
+                is_seen = _is_seen(current_message)
+                applicable_period = retention_days if is_seen else retention_days_unread
+                if applicable_period is None or email.date > now - timedelta(days=applicable_period):
+                    if not is_seen:
+                        skipped_unread += 1
                     continue
 
                 _move_to_trash(mailbox, email)
@@ -141,11 +153,12 @@ def cleanup_expired_read_mails(db, mailbox):
                 email.removal_reason = "retention"
                 moved += 1
                 logger.info(
-                    "Email %s moved from %s to %s after %s retention days",
+                    "Email %s moved from %s to %s after %s retention days (%s)",
                     email.id,
                     folder_name,
                     TRASH_FOLDER,
-                    retention_days,
+                    applicable_period,
+                    "read" if is_seen else "unread",
                 )
             except Exception as error:
                 errors.append({"email_id": email.id, "error": str(error)})
@@ -237,7 +250,7 @@ def sync_existing_mails():
                 email.removed_at = sync_started
                 email.removal_reason = "external"
             db.commit()
-            cleanup = cleanup_expired_read_mails(db, mailbox)
+            cleanup = cleanup_expired_mails(db, mailbox)
             db.commit()
             return {"checked": checked, "changed": changed, "cleanup": cleanup}
         except Exception:

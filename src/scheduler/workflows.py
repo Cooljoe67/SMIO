@@ -92,6 +92,7 @@ def _run_retraining(summary_date=None):
                 SummarySnapshot.summary_date == str(summary_date)
             ).one_or_none()
             if snapshot is not None:
+                gather_daily_summary(db, summary_date, force=True)
                 snapshot.retrain_run_id = result.get("run_id")
                 snapshot.retrain_result_json = json.dumps(result, default=str)
                 db.commit()

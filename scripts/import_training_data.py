@@ -37,6 +37,7 @@ def import_training_data():
 
                     # Ground truth label for testing
                     true_label=label,
+                    is_training_data=True,
 
                     # Model prediction will be added later
                     classification=None,

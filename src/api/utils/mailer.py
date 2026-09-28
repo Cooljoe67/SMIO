@@ -9,7 +9,7 @@ from email.utils import formataddr
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-from .settings import gmail_settings
+from .settings import email_settings, gmail_settings
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,7 @@ def send_summary_email(body, html_body=None, subject="SMIO Daily Summary"):
     message["Subject"] = subject
     message["From"] = formataddr((gmail_settings.from_name, gmail_settings.from_address))
     message["To"] = gmail_settings.to_address
+    message["Reply-To"] = email_settings.user
 
     try:
         credentials = Credentials(

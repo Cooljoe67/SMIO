@@ -57,6 +57,7 @@ def ensure_email_columns():
         "retrain_batch": "INTEGER",
         "processed_at": "DATETIME",
         "is_eval_holdout": "BOOLEAN",
+        "is_training_data": "BOOLEAN NOT NULL DEFAULT 0",
     }
     existing_columns = {
         column["name"] for column in inspect(engine).get_columns("emails")
@@ -72,6 +73,19 @@ def ensure_email_columns():
         )
         connection.execute(
             text("UPDATE emails SET is_eval_holdout = 0 WHERE is_eval_holdout IS NULL")
+        )
+        connection.execute(
+            text("UPDATE emails SET is_training_data = 0 WHERE is_training_data IS NULL")
+        )
+        connection.execute(
+            text(
+                "UPDATE emails SET is_training_data = 1 "
+                "WHERE COALESCE(processing_batch, 0) = 0 "
+                "AND true_label IS NOT NULL "
+                "AND COALESCE(uid, '') = '' "
+                "AND COALESCE(message_id, '') = '' "
+                "AND classification_source IS NULL"
+            )
         )
         connection.execute(
             text(

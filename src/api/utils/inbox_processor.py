@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime, timezone
+from email.utils import parseaddr
 
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
@@ -12,10 +13,16 @@ from src.api.utils.imap_client import (
     move_email_to_classification_folder,
     move_email_to_inbox,
 )
-from src.api.utils.settings import email_settings
+from src.api.utils.settings import email_settings, gmail_settings
 
 
 logger = logging.getLogger(__name__)
+
+
+def _is_smio_mail(sender):
+    sender_address = parseaddr(sender or "")[1].strip().casefold()
+    smio_address = parseaddr(gmail_settings.from_address or "")[1].strip().casefold()
+    return bool(smio_address and sender_address == smio_address)
 
 
 def process_email_by_id(email_id: int, db: Session, batch_id: int = None, mailbox=None):
@@ -35,6 +42,23 @@ def process_email_by_id(email_id: int, db: Session, batch_id: int = None, mailbo
         return None
 
     try:
+        if _is_smio_mail(email.sender):
+            email.classification = "other"
+            email.classification_source = "system"
+            email.confidence = None
+            email.processed = int(email.processed or 0) + 1
+            email.processing_batch = batch_id
+            email.processed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            db.commit()
+            logger.info("Email %s from SMIO left in INBOX without classification", email_id)
+            return {
+                "email_id": email_id,
+                "classification": "other",
+                "confidence": None,
+                "ner_executed": False,
+                "classification_skipped": True,
+            }
+
         # 2. Classification
         classification, confidence = predict_text(email.text)
         amazon_status = amazon_sender_status(
