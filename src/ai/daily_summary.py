@@ -11,7 +11,7 @@ from sqlalchemy import func
 
 from src.api.utils.folder_rules import CLASSIFICATION_FOLDERS
 from src.api.utils.settings import app_settings
-from src.db.models import Email, SummarySnapshot
+from src.db.models import Email, RetrainRun, SummarySnapshot
 
 RETRAIN_LOG_FILE = Path("./models/retrain_log.jsonl")
 RETRAIN_STATE_FILE = Path("./models/retrain_state.json")
@@ -150,7 +150,32 @@ def _delivery_snapshot(emails, period_start, reference_date):
     }
 
 
-def _retraining_snapshot():
+def _retraining_snapshot(db):
+    from src.db.database import ensure_retrain_run_table
+
+    ensure_retrain_run_table()
+    runs = (
+        db.query(RetrainRun)
+        .order_by(RetrainRun.id.desc())
+        .limit(10)
+        .all()
+    )
+    state = _load_json(RETRAIN_STATE_FILE)
+    if runs:
+        history = [json.loads(run.result_json) for run in reversed(runs)]
+        promoted = [run for run in runs if run.promoted]
+        latest = history[-1]
+        return {
+            "last_run_at": latest.get("run_at"),
+            "last_promoted_at": promoted[0].run_at if promoted else None,
+            "last_run_id": latest.get("run_id"),
+            "last_metrics": latest,
+            "history": history,
+            "promoted_runs": db.query(RetrainRun).filter(
+                RetrainRun.promoted.is_(True)
+            ).count(),
+        }
+
     history, state = _load_retraining_history()
     latest = history[-1] if history else {}
     promoted = [entry for entry in history if entry.get("promoted")]
@@ -221,7 +246,7 @@ def build_daily_summary(db, summary_date=None, persist=False):
         1 for email in all_emails
         if email.true_label and email.classification_source == "imap_folder"
     )
-    retraining = _retraining_snapshot()
+    retraining = _retraining_snapshot(db)
     deliveries = _delivery_snapshot(emails, period_start, logical_date)
     retrain_due = pending_corrections >= RETRAIN_MIN_CORRECTIONS
     db_snapshot = {
@@ -276,9 +301,9 @@ def build_daily_summary(db, summary_date=None, persist=False):
     if metrics:
         lines.append(
             "- Latest metrics: "
-            f"accuracy {metrics.get('accuracy', metrics.get('new_accuracy', 'n/a'))}, "
-            f"recall {metrics.get('recall_macro', metrics.get('new_recall_macro', 'n/a'))}, "
-            f"F1 {metrics.get('f1_macro', metrics.get('new_f1', 'n/a'))}"
+            f"accuracy {_format_metric(metrics, 'accuracy', 'new_accuracy')}, "
+            f"recall {_format_metric(metrics, 'recall_macro', 'new_recall_macro')}, "
+            f"F1 {_format_metric(metrics, 'f1_macro', 'new_f1')}"
         )
     lines.extend(_email_command_help_lines())
 
@@ -301,7 +326,26 @@ def build_daily_summary(db, summary_date=None, persist=False):
 
 
 def _metric(metrics, primary_key, fallback_key):
-    return metrics.get(primary_key, metrics.get(fallback_key)) if metrics else None
+    if not metrics:
+        return None
+    value = metrics.get(primary_key)
+    return value if value is not None else metrics.get(fallback_key)
+
+
+def _format_metric(metrics, primary_key, fallback_key):
+    value = _metric(metrics, primary_key, fallback_key)
+    if value is None or str(value).strip().casefold() in {"", "n/a", "na"}:
+        return "-"
+    try:
+        return f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return "-"
+
+
+def _display_value(value):
+    if value is None or str(value).strip().casefold() in {"", "n/a", "na"}:
+        return "-"
+    return value
 
 
 def gather_daily_summary(db, summary_date=None, force=False):
@@ -362,7 +406,7 @@ def stored_daily_summary(db, summary_date=None):
     if snapshot is None:
         return None
     summary = json.loads(snapshot.data_json)
-    summary["retraining"] = _retraining_snapshot()
+    summary["retraining"] = _retraining_snapshot(db)
     message_lines = summary["message"].splitlines()
     if "Model" in message_lines:
         message_lines = message_lines[:message_lines.index("Model") + 1]
@@ -379,9 +423,9 @@ def stored_daily_summary(db, summary_date=None):
     if metrics:
         message_lines.append(
             "- Latest metrics: "
-            f"accuracy {metrics.get('accuracy', metrics.get('new_accuracy', 'n/a'))}, "
-            f"recall {metrics.get('recall_macro', metrics.get('new_recall_macro', 'n/a'))}, "
-            f"F1 {metrics.get('f1_macro', metrics.get('new_f1', 'n/a'))}"
+            f"accuracy {_format_metric(metrics, 'accuracy', 'new_accuracy')}, "
+            f"recall {_format_metric(metrics, 'recall_macro', 'new_recall_macro')}, "
+            f"F1 {_format_metric(metrics, 'f1_macro', 'new_f1')}"
         )
     message_lines.extend(_email_command_help_lines())
     summary["message"] = "\n".join(message_lines)
@@ -419,14 +463,33 @@ def _format_html_summary(summary):
             f"<td>{number(count)}</td><td>{number(unread)}</td>"
             f"<td>{number(removed)}</td></tr>"
         )
-    bars = []
+    bar_rows = []
     maximum = max(summary["new_counts"].values(), default=1)
     for classification, count in summary["new_counts"].items():
-        width = round((count / maximum) * 100) if maximum else 0
-        bars.append(
-            f"<div class=\"bar-row\"><span>{html.escape(classification.title())}</span>"
-            f"<div class=\"bar-track\"><div class=\"bar\" style=\"width:{width}%\"></div></div>"
-            f"<b>{number(count)}</b></div>"
+        bar_width = round((count / maximum) * 160) if maximum else 0
+        filled_bar = (
+            f'<td width="{bar_width}" bgcolor="#3caea3" '
+            'style="height:10px;font-size:8px;line-height:8px">&nbsp;</td>'
+            if bar_width
+            else ""
+        )
+        empty_width = max(160 - bar_width, 0)
+        empty_bar = (
+            f'<td width="{empty_width}" bgcolor="#e6edf2" '
+            'style="height:10px;font-size:8px;line-height:8px">&nbsp;</td>'
+            if empty_width
+            else ""
+        )
+        bar_rows.append(
+            "<tr>"
+            f'<td width="96" style="padding:4px 8px 4px 0;font-size:13px">'
+            f"{html.escape(classification.title())}</td>"
+            '<td width="168" style="padding:4px 0">'
+            '<table role="presentation" width="160" cellpadding="0" cellspacing="0" border="0">'
+            f"<tr>{filled_bar}{empty_bar}</tr></table></td>"
+            f'<td width="40" align="right" style="padding:4px 0 4px 8px;font-size:13px">'
+            f"<b>{number(count)}</b></td>"
+            "</tr>"
         )
     delivery_rows = []
     for item in summary["deliveries"]["upcoming"]:
@@ -442,30 +505,31 @@ def _format_html_summary(summary):
     metric_text = "No retraining metrics available yet."
     if metrics:
         metric_text = (
-            f"Accuracy: {number(metrics.get('accuracy', metrics.get('new_accuracy', 'n/a')))} · "
-            f"Recall: {number(metrics.get('recall_macro', metrics.get('new_recall_macro', 'n/a')))} · "
-            f"F1: {number(metrics.get('f1_macro', metrics.get('new_f1', 'n/a')))}"
+            f"Accuracy: {number(_format_metric(metrics, 'accuracy', 'new_accuracy'))} · "
+            f"Recall: {number(_format_metric(metrics, 'recall_macro', 'new_recall_macro'))} · "
+            f"F1: {number(_format_metric(metrics, 'f1_macro', 'new_f1'))}"
         )
     history_rows = []
     for entry in reversed(summary["retraining"]["history"]):
         history_rows.append(
             "<tr>"
-            f"<td>{number(entry.get('run_at', entry.get('run_id', 'n/a')))}</td>"
-            f"<td>{number(entry.get('eval_holdout_size', 'n/a'))}</td>"
-            f"<td>{number(entry.get('new_accuracy', 'n/a'))}</td>"
-            f"<td>{number(entry.get('new_recall_macro', 'n/a'))}</td>"
-            f"<td>{number(entry.get('new_f1', entry.get('f1', 'n/a')))}</td>"
+            f"<td>{number(_display_value(entry.get('run_at') or entry.get('run_id')))}</td>"
+            f"<td>{number(_display_value(entry.get('eval_holdout_size')))}</td>"
+            f"<td>{number(_format_metric(entry, 'new_accuracy', 'accuracy'))}</td>"
+            f"<td>{number(_format_metric(entry, 'new_recall_macro', 'recall_macro'))}</td>"
+            f"<td>{number(_format_metric(entry, 'new_f1', 'f1'))}</td>"
             f"<td>{'promoted' if entry.get('promoted') else 'kept as candidate'}</td>"
             "</tr>"
         )
     return f"""<!doctype html>
 <html><body style="margin:0;background:#f4f6f8;color:#17212b;font-family:Arial,sans-serif">
 <div style="max-width:720px;margin:0 auto;padding:28px 18px">
-<div style="background:#173f5f;color:white;padding:24px;border-radius:10px 10px 0 0">
-<div style="font-size:13px;letter-spacing:1px;text-transform:uppercase">SMIO</div>
-<h1 style="margin:6px 0 4px;font-size:26px">Daily mailbox summary - {number(_format_datetime(summary['period_end']))}</h1>
-<div style="opacity:.82">{number(_format_datetime(summary['period_start']))} to {number(_format_datetime(summary['period_end']))}</div>
-</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt">
+<tr><td bgcolor="#173f5f" style="background-color:#173f5f;color:#ffffff;padding:24px">
+<p style="margin:0 0 6px;font-family:Arial,sans-serif;font-size:13px;line-height:16px;text-transform:uppercase;color:#ffffff">SMIO</p>
+<p style="margin:0 0 4px;font-family:Arial,sans-serif;font-size:26px;line-height:32px;font-weight:bold;color:#ffffff">Daily Mailbox Summary</p>
+<p style="margin:0;font-family:Arial,sans-serif;font-size:14px;line-height:20px;color:#ffffff">{number(_format_datetime(summary['period_start']))} to {number(_format_datetime(summary['period_end']))}</p>
+</td></tr></table>
 <div style="background:white;padding:22px;border:1px solid #dce3e8;border-top:0">
 <h2>Mailbox</h2>
 <p><b>{number(summary['db']['total_entries'])}</b> database entries ·
@@ -473,7 +537,7 @@ def _format_html_summary(summary):
 {'<p style="color:#b54708"><b>Retraining is due.</b></p>' if summary['db']['retrain_due'] else ''}
 <h2>Categories</h2>
 <table style="width:100%;border-collapse:collapse"><tr><th align="left">Category</th><th align="left">New</th><th align="left">Unread</th><th align="left">Removed</th></tr>{''.join(categories)}</table>
-<div style="margin:18px 0">{''.join(bars)}</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:18px 0;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt">{''.join(bar_rows)}</table>
 <h2>Deliveries</h2>
 <p>Due today: <b>{number(summary['deliveries']['today_count'])}</b></p>
 <table style="width:100%;border-collapse:collapse"><tr><th align="left">Date</th><th align="left">Item</th><th align="left">Company</th><th align="left">Status</th></tr>{''.join(delivery_rows) or '<tr><td colspan="4">No upcoming deliveries found.</td></tr>'}</table>
@@ -483,12 +547,11 @@ Last promoted model: {number(summary['retraining']['last_promoted_at'] or 'not a
 <h3 style="font-size:15px;color:#173f5f">Retraining history</h3>
 <table style="width:100%;border-collapse:collapse"><tr><th align="left">Run</th><th align="left">Holdout</th><th align="left">Accuracy</th><th align="left">Recall</th><th align="left">F1</th><th align="left">Status</th></tr>{''.join(history_rows) or '<tr><td colspan="6">No retraining runs found.</td></tr>'}</table>
 <h3 style="font-size:15px;color:#173f5f">Email commands</h3>
-<p>Reply to this summary with one command on the first line; optionally prefix it with <code>SMIO:</code>.<br>
-Use a summary reply subject (for example, <code>AW: SMIO Daily Summary</code>) or the fallback subject <code>SMIO Command</code>.</p>
+<p>Reply to this summary with one command on the first line.<br></p>
 <ul><li><b>UNDO</b>: restore the last processing batch to INBOX.</li>
 <li><b>RETRAIN</b>: force a retraining attempt; an evaluation holdout is required.</li>
 <li><b>RELOAD MODEL</b>: reload the deployed classifier.</li>
 <li><b>SUMMARY</b>: send an on-demand summary.</li></ul>
 </div></div>
-<style>h2{{font-size:18px;margin:22px 0 10px;color:#173f5f}}td,th{{padding:8px 6px;border-bottom:1px solid #e5e9ed;font-size:14px}}.bar-row{{display:flex;align-items:center;gap:8px;margin:7px 0;font-size:13px}}.bar-row span{{width:90px}}.bar-track{{height:10px;background:#e6edf2;border-radius:5px;flex:1;overflow:hidden}}.bar{{height:100%;background:#3caea3;border-radius:5px}}</style>
+<style>h2{{font-size:18px;margin:22px 0 10px;color:#173f5f}}td,th{{padding:8px 6px;border-bottom:1px solid #e5e9ed;font-size:14px}}</style>
 </body></html>"""

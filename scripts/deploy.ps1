@@ -139,7 +139,7 @@ if (-not $repositoryExists) {
 Invoke-Gcloud @("auth", "configure-docker", $ArtifactRegistryHost, "--quiet")
 
 Write-Host "Building Docker image..."
-docker build -t $Image .
+docker build --target cloud-run -t $Image .
 if ($LASTEXITCODE -ne 0) {
     throw "Docker build failed with exit code $LASTEXITCODE"
 }
