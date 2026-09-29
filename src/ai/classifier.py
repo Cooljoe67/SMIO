@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import torch
 from transformers import DistilBertForSequenceClassification, DistilBertTokenizerFast
@@ -13,10 +14,18 @@ MAX_LENGTH = 256
 
 
 def _sync_deployed_model():
-    """Use the GCS model when configured, seeding it from the local model once."""
+    """Use GCS when configured, seeding it only from a complete local model."""
     if not gcs.enabled():
         return
     if not gcs.download_directory(MODEL_GCS_PREFIX, MODEL_PATH):
+        local_model = Path(MODEL_PATH)
+        if not (local_model / "config.json").is_file() or not (
+            local_model / "model.safetensors"
+        ).is_file():
+            raise FileNotFoundError(
+                f"Classifier model is missing from GCS prefix {MODEL_GCS_PREFIX!r} "
+                "and no complete local fallback is bundled."
+            )
         gcs.upload_directory(MODEL_PATH, MODEL_GCS_PREFIX)
 
 

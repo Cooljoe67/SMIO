@@ -8,85 +8,61 @@ SMIO connects to your mailbox via IMAP, classifies incoming mails with a fine-tu
 
 ## 📌 Features
 
-- **AI-based email classification**
-  Classifies each mail into `delivery`, `commercial`, `social`, `tech`, or `other` using a fine-tuned DistilBERT model ([src/ai/classifier.py](src/ai/classifier.py)).
-
-- **Named Entity Recognition (NER) for deliveries**
-  For mails classified as `delivery`, extracts order IDs, tracking numbers, carrier, item name, and delivery status/date using a custom token-classification model plus regex/rule fallbacks ([src/ai/ner.py](src/ai/ner.py), [src/ai/email_metadata.py](src/ai/email_metadata.py)). Includes special-cased handling for Amazon sender addresses.
-
-- **Automated inbox actions**
-  - Moves classified mails into per-category IMAP folders. Read mail follows each folder's configured retention; unread mail is moved to `Papierkorb` after 20 days. Read delivery mail has no expiry by default — see [src/api/utils/folder_rules.py](src/api/utils/folder_rules.py).
-  - Detects manual corrections: if you move a mail to a different folder yourself, SMIO records that as the ground-truth label (`true_label`) for future retraining.
-  - Leaves SMIO-generated mail in `INBOX` without classification or folder routing.
-  - `undo_last_processing` reverts the most recent processing batch and moves mails back to `INBOX`.
-
-- **Persistent daily summary snapshots**
-  Builds a logical-day digest from `08:00` to `08:00` in the configured timezone, stores the message and queryable metrics in the `summary_snapshots` table, and can send the stored snapshot by email. Human-readable dates use `DD/MM/YYYY`; tagged seed training/evaluation records are excluded from mailbox totals while remaining available for retraining. Retraining history includes unpromoted candidate metrics — see [src/ai/daily_summary.py](src/ai/daily_summary.py).
-
-- **Email commands**
-  Reply from the configured mailbox to a summary using its reply subject (for example, `AW: SMIO Daily Summary`) or use the fallback subject `SMIO Command`. Put `UNDO`, `RETRAIN`, `RELOAD MODEL`, or `SUMMARY` on the first non-empty body line; optionally prefix it with `SMIO:`. The five-minute workflow handles these commands and moves handled command messages to `Papierkorb`.
-
-- **Self-improving classifier (replay-buffer retraining)**
-  Once enough manual corrections accumulate (default: 20, configurable), SMIO fine-tunes the deployed model on a mix of the new corrections and a random sample of existing labeled data per class (90/10 replay ratio), evaluates the candidate against the currently deployed model on a fixed, continuously-growing hold-out set, and only promotes the new model if its macro-F1 is at least as good — see [src/ai/retrain.py](src/ai/retrain.py).
-
-- **FastAPI backend**
-  Endpoints for IMAP sync/fetch, inbox processing, and the daily summary (see below).
-
-- **Sequential cron workflow**
-  The workflow can run as one daily operation or as separate gather, send, and retrain jobs. Each scheduled operation is guarded by a process lock so overlapping work is skipped safely — see [src/scheduler/workflows.py](src/scheduler/workflows.py).
-
----
+- **AI-based email classification** — categorizes mail as `delivery`, `commercial`, `social`, `tech`, or `other` with a fine-tuned DistilBERT model.
+- **Delivery extraction** — identifies tracking and order details with a token-classification NER model and rule-based fallbacks.
+- **Inbox automation** — files messages by category, applies read/unread retention rules, records manual folder moves as corrections, and supports undo.
+- **Email commands** — accepts `UNDO`, `RETRAIN`, `RELOAD MODEL`, and `SUMMARY` from the configured mailbox; no separate dashboard is needed.
+- **Daily summaries** — stores logical-day snapshots, delivery details, and retraining status. Display dates use `DD/MM/YYYY`; seed training data is excluded from mailbox counts.
+- **Replay-buffer retraining** — learns from manual corrections mixed with earlier labeled mail, evaluates candidates on a held-out set, and promotes only when macro-F1 is no worse than the deployed model.
+- **Local and cloud operation** — run locally or on Cloud Run with Cloud Scheduler; Cloud Run loads the classifier from GCS, while local images include a classifier fallback.
 
 ## 🧠 Core technologies
 
-- Python 3.x
-- HuggingFace Transformers (DistilBERT for classification, token classification for NER)
-- PyTorch, scikit-learn (F1 evaluation)
-- FastAPI + SQLAlchemy (SQLite, optionally synchronized to Google Cloud Storage)
-- imap-tools (IMAP access)
-- pydantic-settings (`.env` configuration)
-
----
+- Python 3.x, PyTorch, Hugging Face Transformers, scikit-learn
+- FastAPI and SQLAlchemy with SQLite
+- `imap-tools` for IMAP access
+- Google Cloud Run, Cloud Scheduler, and Cloud Storage (optional)
 
 ## 📂 Project structure
 
-```
+```text
 SMIO/
   src/
-    ai/
-      classifier.py        # DistilBERT classification + reload_model()
-      ner.py                # NER model + rule-based extraction
-      email_metadata.py     # Delivery field extraction from sender/subject/body
-      labels.py             # Classification label <-> id mapping
-      daily_summary.py       # Builds the daily digest text
-      retrain.py             # Replay-buffer retraining pipeline
+    ai/                 # classification, NER, summaries, retraining
     api/
-      main.py               # FastAPI app, router registration
-      routers/               # inbox, imap, summary endpoints
-      utils/
-        imap_client.py       # IMAP fetch/sync/move/cleanup logic
-        inbox_processor.py    # Classification + NER processing pipeline
-        folder_rules.py       # Category -> IMAP folder + retention rules
-        settings.py           # IMAP/SMTP/app settings (.env)
-        mailer.py             # SMTP summary email sender
-    db/
-      database.py           # SQLite engine, session, schema migration helper
-      models.py              # Email SQLAlchemy model
-  scripts/
-    deploy.ps1               # Cloud Run deployment
-    run_workflow.py          # Cron entry point: fetch -> process -> summary -> retrain
-    backfill_summary_snapshots.py # Backfill snapshots from existing email history
-    bootstrap_eval_holdout.py # One-time: carve the initial retrain eval hold-out
-    sync_database_with_gcs.py # Download/edit/upload the GCS-backed SQLite database
-    create_gmail_refresh_token.py # Create Gmail API OAuth credentials
-    train_distilbert_optuna.py, train_ner.py, ...  # Standalone training/eval scripts
+      routers/          # inbox, IMAP, summary, scheduled jobs
+      utils/            # mailbox, commands, folder rules, email delivery
+    db/                 # database engine, migrations, ORM models
+    scheduler/          # scheduled workflow orchestration
+    storage/            # Google Cloud Storage integration
+  scripts/              # deployment, data import/export, training, maintenance
+    deploy.ps1
+    sync_database_with_gcs.py
+    run_workflow.py
+    backfill_summary_snapshots.py
+    bootstrap_eval_holdout.py
+    create_gmail_refresh_token.py
+    evaluate_classifier.py
+    export_ner_from_db.py
+    export_training_data.py
+    import_training_data.py
+    test_classifier.py
+    train_bert_classifier.py
+    train_distilbert_hparam_cv.py
+    train_distilbert_optuna.py
+    train_ner.py
   models/
-    distilbert_deployed/     # Currently deployed classifier
-    distilbert_optuna/        # Hyperparameter search checkpoints
-    ner-smio/                 # Deployed NER model
+    distilbert_deployed/
+    distilbert_optuna/
+    distilbert_candidate_*/
+    ner-smio/
   data/
-    raw/, labeled/
-  tests/
+    raw/
+    labeled/
+  training_data.jsonl
+  ner_training.jsonl
+  Dockerfile
+  requirements.txt
 ```
 
 ---
@@ -125,9 +101,12 @@ docker build -t smio:local .
 docker run --rm -p 8080:8080 --env-file .env smio:local
 ```
 
-The container serves the API at `http://localhost:8080`. For Cloud Run, configure
-the same environment variables through Secret Manager or the Cloud Run service
-configuration; do not add `.env` to the image.
+The default `local` image includes the checked-out classifier model. The Cloud Run
+deployment script builds the `cloud-run` target, which omits that copy and loads the
+authoritative classifier from GCS. Ensure the configured GCS model prefix exists
+before deploying. The container serves the API at `http://localhost:8080`. Configure
+Cloud Run environment variables through Secret Manager or service configuration; do
+not add `.env` to the image.
 
 ### Local operation without Google Cloud
 

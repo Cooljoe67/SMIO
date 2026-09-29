@@ -26,6 +26,7 @@ from transformers import (
 
 from src.ai import classifier
 from src.ai.labels import LABEL2ID
+from src.db.database import record_retrain_run
 from src.db.models import Email
 from src.storage import gcs
 
@@ -321,4 +322,6 @@ def retrain_if_due(db, min_corrections=MIN_CORRECTIONS):
         "candidate_dir": str(candidate_dir),
     }
     _append_log(result)
+    record_retrain_run(db, result)
+    db.commit()
     return result
