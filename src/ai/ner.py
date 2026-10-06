@@ -1,14 +1,95 @@
 import json
+import logging
 import os
 import re
+import tempfile
+from pathlib import Path
 
 import torch
 from transformers import AutoModelForTokenClassification, AutoTokenizer
 
+from src.storage import gcs
+
+logger = logging.getLogger(__name__)
 
 MODEL_PATH = os.getenv("NER_MODEL_PATH", "./models/ner-smio")
+MODEL_GCS_PREFIX = os.getenv("GCS_NER_MODEL_PREFIX", "models/ner-smio")
+EXPECTED_MODEL_REVISION = os.getenv("SMIO_NER_MODEL_REVISION", "")
 MAX_LENGTH = 256
 
+
+def _model_is_complete(path):
+    path = Path(path)
+    has_weights = any(
+        (path / name).is_file()
+        for name in ("model.safetensors", "pytorch_model.bin")
+    )
+    has_tokenizer = any(
+        (path / name).is_file()
+        for name in ("tokenizer.json", "vocab.txt", "spiece.model")
+    )
+    return (path / "config.json").is_file() and has_weights and has_tokenizer
+
+
+def _active_model_prefix():
+    releases_prefix = f"{MODEL_GCS_PREFIX.rstrip('/')}/releases/"
+    if EXPECTED_MODEL_REVISION:
+        if not re.fullmatch(r"\d{8}T\d{12}Z", EXPECTED_MODEL_REVISION):
+            raise ValueError("SMIO_NER_MODEL_REVISION has an invalid format")
+        return f"{releases_prefix}{EXPECTED_MODEL_REVISION}", EXPECTED_MODEL_REVISION
+
+    pointer_name = f"{MODEL_GCS_PREFIX.rstrip('/')}/current.json"
+    with tempfile.TemporaryDirectory(prefix="smio-ner-pointer-") as temporary_dir:
+        pointer_path = Path(temporary_dir) / "current.json"
+        if not gcs.download_file(pointer_name, pointer_path):
+            return MODEL_GCS_PREFIX, None
+
+        pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    revision = pointer.get("revision")
+    prefix = pointer.get("prefix")
+    expected_prefix = f"{releases_prefix}{revision}"
+    if (
+        not isinstance(revision, str)
+        or not re.fullmatch(r"\d{8}T\d{12}Z", revision)
+        or prefix != expected_prefix
+    ):
+        raise ValueError(f"Invalid NER model pointer at {pointer_name!r}")
+    return prefix, revision
+
+
+def _sync_model():
+    if not gcs.enabled():
+        return "local"
+
+    active_prefix, revision = _active_model_prefix()
+
+    if not gcs.download_directory(active_prefix, MODEL_PATH):
+        if revision:
+            raise FileNotFoundError(
+                f"Pinned NER model release {active_prefix!r} is missing from GCS."
+            )
+        if not _model_is_complete(MODEL_PATH):
+            raise FileNotFoundError(
+                f"NER model is missing from GCS prefix {active_prefix!r} "
+                "and no complete local fallback is available."
+            )
+        gcs.upload_directory(MODEL_PATH, active_prefix)
+
+    if not _model_is_complete(MODEL_PATH):
+        raise FileNotFoundError(
+            f"NER model at GCS prefix {active_prefix!r} is incomplete."
+        )
+    return revision or "legacy"
+
+
+MODEL_REVISION = _sync_model()
+logger.info("Loading NER model revision %s", MODEL_REVISION)
+if EXPECTED_MODEL_REVISION and MODEL_REVISION != EXPECTED_MODEL_REVISION:
+    logger.warning(
+        "Cloud Run expects NER revision %s, but GCS pointer selects %s",
+        EXPECTED_MODEL_REVISION,
+        MODEL_REVISION,
+    )
 _tokenizer = AutoTokenizer.from_pretrained(
     MODEL_PATH,
     clean_up_tokenization_spaces=True,

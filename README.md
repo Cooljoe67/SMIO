@@ -11,9 +11,9 @@ SMIO connects to your mailbox via IMAP, classifies incoming mails with a fine-tu
 - **AI-based email classification** — categorizes mail as `delivery`, `commercial`, `social`, `tech`, or `other` with a fine-tuned DistilBERT model.
 - **Delivery extraction** — identifies tracking and order details with a token-classification NER model and rule-based fallbacks.
 - **Inbox automation** — files messages by category, applies read/unread retention rules, records manual folder moves as corrections, and supports undo.
-- **Email commands** — accepts `UNDO`, `RETRAIN`, `RELOAD MODEL`, and `SUMMARY` from the configured mailbox; no separate dashboard is needed.
+- **Email commands** — accepts `UNDO`, `RETRAIN`, `RELOAD MODEL`, `RESTORE MODEL`, `LOGS <1-2000>`, and `SUMMARY` from the configured mailbox; commands are moved to Trash before execution, with failure notices for errors and timed-out attempts.
 - **Daily summaries** — stores logical-day snapshots, delivery details, and retraining status. Display dates use `DD/MM/YYYY`; seed training data is excluded from mailbox counts.
-- **Replay-buffer retraining** — learns from manual corrections mixed with earlier labeled mail, evaluates candidates on a held-out set, and promotes only when macro-F1 is no worse than the deployed model.
+- **Replay-buffer retraining** — learns from manual corrections mixed with earlier labeled mail, discards rejected candidates, and promotes only when macro-F1 is no worse, the paired-bootstrap 95% lower bound is within a 2-point non-inferiority margin, and no class with at least 10 holdout examples loses more than 10 points of recall. Replaced models are archived in GCS for seven days and can be restored by email command.
 - **Local and cloud operation** — run locally or on Cloud Run with Cloud Scheduler; Cloud Run loads the classifier from GCS, while local images include a classifier fallback.
 
 ## 🧠 Core technologies
@@ -37,11 +37,11 @@ SMIO/
     storage/            # Google Cloud Storage integration
   scripts/              # deployment, data import/export, training, maintenance
     deploy.ps1
+    update_ner_model.py
     sync_database_with_gcs.py
     run_workflow.py
     backfill_summary_snapshots.py
     bootstrap_eval_holdout.py
-    create_gmail_refresh_token.py
     evaluate_classifier.py
     export_ner_from_db.py
     export_training_data.py
@@ -63,6 +63,7 @@ SMIO/
   ner_training.jsonl
   Dockerfile
   requirements.txt
+  requirements-runtime.txt
 ```
 
 ---
@@ -101,10 +102,12 @@ docker build -t smio:local .
 docker run --rm -p 8080:8080 --env-file .env smio:local
 ```
 
-The default `local` image includes the checked-out classifier model. The Cloud Run
-deployment script builds the `cloud-run` target, which omits that copy and loads the
-authoritative classifier from GCS. Ensure the configured GCS model prefix exists
-before deploying. The container serves the API at `http://localhost:8080`. Configure
+The default `local` image includes the checked-out classifier and NER models. The
+Cloud Run target omits both models and loads them from GCS. Docker installs the
+CPU-only `requirements-runtime.txt`; the full `requirements.txt` remains for local
+training and evaluation. Ensure the classifier prefix exists and upload the NER
+model with `-UpdateNerModel` on the first migration. The container serves the API
+at `http://localhost:8080`. Configure
 Cloud Run environment variables through Secret Manager or service configuration; do
 not add `.env` to the image.
 
@@ -159,18 +162,21 @@ The API exposes these scheduler/action endpoints:
 | POST | `/jobs/daily/send` | Manual | Send the stored summary for one date |
 | POST | `/jobs/daily/retrain` | Manual | Run retraining if the correction threshold is met |
 
-For a manual source deployment, keep both the Cloud Run instance count and request
-concurrency at one while SQLite is stored in GCS:
+For manual `gcloud` commands, set `GCP_PROJECT_ID`, `GCP_REGION`, and optionally
+`GCP_SCHEDULER_LOCATION` in your shell from `.env` first. For a manual source
+deployment, keep both the Cloud Run instance count and request concurrency at one
+while SQLite is stored in GCS:
 
 ```bash
 gcloud run deploy smio \
   --source . \
-  --region=europe-west3 \
+  --project="$GCP_PROJECT_ID" \
+  --region="$GCP_REGION" \
   --no-allow-unauthenticated \
   --max-instances=1 \
   --concurrency=1 \
   --timeout=3600 \
-  --set-env-vars=GCS_BUCKET=your-smio-bucket,GCS_CLASSIFIER_MODEL_PREFIX=models/distilbert_deployed,GCS_DATABASE_OBJECT=databases/smio.db
+  --set-env-vars=GCS_BUCKET="$GCS_BUCKET",GCS_CLASSIFIER_MODEL_PREFIX=models/distilbert_deployed,GCS_DATABASE_OBJECT=databases/smio.db
 ```
 
 Set IMAP and SMTP values with Secret Manager rather than command-line environment
@@ -179,15 +185,19 @@ Create a dedicated scheduler service account, grant it `roles/run.invoker` on th
 `smio` service, then create the schedules with an OIDC token:
 
 ```bash
+SCHEDULER_LOCATION="${GCP_SCHEDULER_LOCATION:-$GCP_REGION}"
+
 gcloud scheduler jobs create http smio-five-minute \
-  --location=europe-west3 \
+  --location="$SCHEDULER_LOCATION" \
+  --project="$GCP_PROJECT_ID" \
   --schedule="*/5 * * * *" \
   --uri="https://YOUR_CLOUD_RUN_URL/jobs/five-minute" \
   --http-method=POST \
   --oidc-service-account-email=YOUR_SCHEDULER_SERVICE_ACCOUNT
 
 gcloud scheduler jobs create http smio-daily \
-  --location=europe-west3 \
+  --location="$SCHEDULER_LOCATION" \
+  --project="$GCP_PROJECT_ID" \
   --schedule="0 8 * * *" \
   --time-zone="Europe/Berlin" \
   --uri="https://YOUR_CLOUD_RUN_URL/jobs/daily" \
@@ -210,16 +220,49 @@ Run these commands from the repository root.
 (or prompts for login if needed), starts Docker Desktop if it is not running, and
 waits for the Docker engine before building and pushing the image to Artifact
 Registry. It grants the runtime service account access to Secret Manager and GCS,
-then deploys Cloud Run with the required single-instance SQLite settings.
+and read-only Cloud Logging access for the `LOGS` email command. It then deploys
+Cloud Run with the required single-instance SQLite settings.
+Before deploying, it pauses the configured daily and five-minute Scheduler jobs,
+asks you to confirm in-flight workflows have finished, and backs up the existing
+GCS database to a timestamped object under `backups/`. It resumes only the jobs it
+paused, including when deployment fails. Jobs already paused remain paused.
+The deploy defaults are 2 vCPU and 8 GiB memory to support CPU retraining.
 
 ```powershell
 .\scripts\deploy.ps1
 ```
 
-Use `-IncludeGmailSecrets` when the daily summary should be sent through Gmail.
-The script defaults to project `smio-509409`, region `europe-west3`, bucket
-`smio-marcus-my-gcp-project-artifacts`, and the `Europe/Berlin` summary timezone.
-Override its parameters when deploying to another environment.
+Add `-UpdateNerModel` to upload `models/ner-smio` as a new immutable GCS release
+and deploy a Cloud Run revision pinned to it. Use `-NerModelDirectory` to choose a
+different trained model directory.
+
+Daily summaries are appended directly to the configured IMAP inbox. The deploy
+script reads `GCP_PROJECT_ID`, `GCP_REGION`, and `GCS_BUCKET` from `.env`;
+`GCP_SCHEDULER_LOCATION` is optional and defaults to `GCP_REGION`. Explicit
+script parameters override `.env` values.
+
+### Email commands
+
+Reply to a daily summary or use the subject `SMIO Command`, with one command on
+the first line. For example, `LOGS 100` appends up to 100 recent Cloud Run API
+log entries as `smio-api-logs.txt`; the allowed count is 1–2000. Commands are
+moved to Trash before execution. If no completion is recorded within
+`SMIO_COMMAND_TIMEOUT_MINUTES` (15 minutes by default), the next five-minute job
+reports the timeout by email.
+
+### Replace only the NER model
+
+After training NER locally, upload it and update the Cloud Run service without
+rebuilding or pushing the Docker image:
+
+```powershell
+.\smio\Scripts\python.exe .\scripts\update_ner_model.py --model-dir .\models\ner-smio
+```
+
+The script validates the model files, uploads a timestamped release under
+`GCS_NER_MODEL_PREFIX`, updates `current.json`, and creates a new Cloud Run
+revision pinned to that release. If the service update fails, it restores the
+previous pointer.
 
 ### Edit the GCS-backed SQLite database
 
@@ -271,62 +314,38 @@ Run once before the first retraining attempt:
 python -m scripts.bootstrap_eval_holdout
 ```
 
-### Configure Gmail summary delivery
-
-Create a Gmail OAuth client and refresh token for the configured sender address.
-The helper script opens browser authorization and prints the values to store in
-the local environment or Secret Manager:
-
-```powershell
-.\smio\Scripts\python.exe .\scripts\create_gmail_refresh_token.py `
-  --client-secrets path/to/client_secret.json
-```
-
 ---
 
 ## 🔧 Configuration
 
-Create a `.env` file in the project root:
+Copy `.env.example` to `.env` in the project root, then fill in your values.
+The deploy and database-sync scripts load `.env` automatically; keep `.env`
+local and do not commit it.
 
 ```bash
+# Google Cloud deployment
+GCP_PROJECT_ID=your-google-cloud-project-id
+GCP_REGION=your-cloud-run-and-artifact-region
+# Optional; defaults to GCP_REGION.
+GCP_SCHEDULER_LOCATION=your-cloud-scheduler-region
+GCS_BUCKET=your-gcs-bucket
+
 # IMAP (required)
 IMAP_HOST=imap.yourprovider.com
 IMAP_USER=your_email@example.com
 IMAP_PASSWORD=your_password
-# Summary emails use IMAP_USER as their Reply-To address.
-
-# Gmail API (optional — only needed to receive the daily summary email)
-GMAIL_CLIENT_ID=your-oauth-client-id
-GMAIL_CLIENT_SECRET=your-oauth-client-secret
-GMAIL_REFRESH_TOKEN=your-oauth-refresh-token
-GMAIL_TO_ADDRESS=your_email@example.com
-# Gmail must authorize the configured sender address.
-GMAIL_FROM_ADDRESS=sender@example.com
-GMAIL_FROM_NAME=Smio, der Mail Organizer
+# Daily summaries are appended directly to IMAP_USER's INBOX.
 
 # Personalization
 USER_FIRST_NAME=Example User
 
-# Optional: persist the deployed classifier and SQLite database in GCS.
+# Optional GCS object locations
 # Cloud Run uses its service account through Application Default Credentials.
-GCS_BUCKET=your-smio-bucket
 GCS_CLASSIFIER_MODEL_PREFIX=models/distilbert_deployed
+GCS_NER_MODEL_PREFIX=models/ner-smio
 GCS_DATABASE_OBJECT=databases/smio.db
+SMIO_COMMAND_TIMEOUT_MINUTES=15
 ```
-
-When the Gmail OAuth settings are absent, summary delivery is skipped. The
-summary data is still stored in `summary_snapshots`, so sending can be retried
-later without rebuilding the period.
-
-To configure Gmail delivery, enable the Gmail API in the Google Cloud project,
-then create an OAuth consent screen and a **Desktop app** OAuth client for
-`sender@example.com`. Download that client's JSON file locally. Follow the
-**Configure Gmail summary delivery** instructions in Scripts and Operations. The
-browser authorization must use `sender@example.com`. Store the resulting refresh
-token, client ID, and client secret in Secret Manager as `gmail-refresh-token`,
-`gmail-client-id`, and `gmail-client-secret`. Configure `GMAIL_TO_ADDRESS` to the
-1&1 recipient address. Do not add the downloaded OAuth client JSON or refresh token
-to the repository.
 
 When `GCS_BUCKET` is configured, SMIO downloads the deployed model and database at
 startup. The first GCS-enabled run uploads its existing local artifacts if the bucket
@@ -344,8 +363,8 @@ GCS continues to store the deployed classifier model.
 
 1. **Sync & fetch** — reconcile known messages across IMAP folders, fetch new INBOX mails ([src/api/utils/imap_client.py](src/api/utils/imap_client.py)).
 2. **Process** — classify each new mail, run NER for `delivery` mails, move it into its category folder, apply retention-based cleanup ([src/api/utils/inbox_processor.py](src/api/utils/inbox_processor.py)).
-3. **Summarize** — gather and persist a logical-day snapshot, then send its plain-language digest.
-4. **Retrain (if due)** — once enough manual corrections have accumulated, fine-tune the classifier using a replay buffer (90% old data / 10% new corrections per class) and promote it only if it beats the deployed model's F1 on a fixed hold-out set.
+3. **Summarize** — gather and persist a logical-day snapshot, then append its plain-language digest to the IMAP inbox.
+4. **Retrain (if due)** — once enough manual corrections have accumulated, fine-tune the classifier using a replay buffer (90% old data / 10% new corrections per class) and apply the macro-F1, paired-bootstrap, and per-class recall promotion gates on a fixed hold-out set. After a completed run, SMIO emails the baseline and candidate metrics, confidence interval, per-class recall, training duration, and promotion outcome.
 
 ---
 
@@ -359,9 +378,9 @@ GCS continues to store the deployed classifier model.
 | POST | `/inbox/undo_last_processing` | Revert the last processing batch, restore mails to INBOX |
 | GET | `/summary/daily?summary_date=YYYY-MM-DD` | Return a stored snapshot or generate a preview |
 | POST | `/jobs/five-minute` | Cloud Scheduler: fetch and process new mail |
-| POST | `/jobs/daily` | Cloud Scheduler: gather, send, and retrain |
+| POST | `/jobs/daily` | Cloud Scheduler: gather, append to inbox, and retrain |
 | POST | `/jobs/daily/gather?summary_date=YYYY-MM-DD` | Store one fixed-period summary |
-| POST | `/jobs/daily/send?summary_date=YYYY-MM-DD` | Send a stored summary |
+| POST | `/jobs/daily/send?summary_date=YYYY-MM-DD` | Append a stored summary to the IMAP inbox |
 | POST | `/jobs/daily/retrain?summary_date=YYYY-MM-DD` | Run retraining for the current DB state |
 
 ---

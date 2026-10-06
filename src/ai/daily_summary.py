@@ -113,6 +113,8 @@ def _email_command_help_lines():
         "- UNDO: restore the last processing batch to INBOX.",
         "- RETRAIN: force a retraining attempt; an evaluation holdout is required.",
         "- RELOAD MODEL: reload the deployed classifier.",
+        "- RESTORE MODEL: restore the replaced model if its one-week backup is available.",
+        "- LOGS <1-2000>: append recent Cloud Run API logs as a text attachment.",
         "- SUMMARY: send an on-demand summary.",
     ]
 
@@ -305,6 +307,10 @@ def build_daily_summary(db, summary_date=None, persist=False):
             f"recall {_format_metric(metrics, 'recall_macro', 'new_recall_macro')}, "
             f"F1 {_format_metric(metrics, 'f1_macro', 'new_f1')}"
         )
+    lines.append(
+        f"- Latest training duration: "
+        f"{_format_training_duration(metrics.get('training_duration') if metrics else None)}"
+    )
     lines.extend(_email_command_help_lines())
 
     summary = {
@@ -340,6 +346,22 @@ def _format_metric(metrics, primary_key, fallback_key):
         return f"{float(value):.2f}"
     except (TypeError, ValueError):
         return "-"
+
+
+def _format_training_duration(value):
+    if value is None:
+        return "-"
+    try:
+        total_seconds = max(float(value), 0)
+    except (TypeError, ValueError):
+        return "-"
+    if total_seconds < 60:
+        return f"{total_seconds:.2f} s"
+    minutes, seconds = divmod(round(total_seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours} h {minutes} min"
+    return f"{minutes} min {seconds} s"
 
 
 def _display_value(value):
@@ -427,6 +449,10 @@ def stored_daily_summary(db, summary_date=None):
             f"recall {_format_metric(metrics, 'recall_macro', 'new_recall_macro')}, "
             f"F1 {_format_metric(metrics, 'f1_macro', 'new_f1')}"
         )
+    message_lines.append(
+        f"- Latest training duration: "
+        f"{_format_training_duration(metrics.get('training_duration') if metrics else None)}"
+    )
     message_lines.extend(_email_command_help_lines())
     summary["message"] = "\n".join(message_lines)
     summary["html_message"] = _format_html_summary(summary)
@@ -509,6 +535,9 @@ def _format_html_summary(summary):
             f"Recall: {number(_format_metric(metrics, 'recall_macro', 'new_recall_macro'))} · "
             f"F1: {number(_format_metric(metrics, 'f1_macro', 'new_f1'))}"
         )
+    training_duration_text = _format_training_duration(
+        metrics.get("training_duration") if metrics else None
+    )
     history_rows = []
     for entry in reversed(summary["retraining"]["history"]):
         history_rows.append(
@@ -518,6 +547,7 @@ def _format_html_summary(summary):
             f"<td>{number(_format_metric(entry, 'new_accuracy', 'accuracy'))}</td>"
             f"<td>{number(_format_metric(entry, 'new_recall_macro', 'recall_macro'))}</td>"
             f"<td>{number(_format_metric(entry, 'new_f1', 'f1'))}</td>"
+            f"<td>{number(_format_training_duration(entry.get('training_duration')))}</td>"
             f"<td>{'promoted' if entry.get('promoted') else 'kept as candidate'}</td>"
             "</tr>"
         )
@@ -543,14 +573,17 @@ def _format_html_summary(summary):
 <table style="width:100%;border-collapse:collapse"><tr><th align="left">Date</th><th align="left">Item</th><th align="left">Company</th><th align="left">Status</th></tr>{''.join(delivery_rows) or '<tr><td colspan="4">No upcoming deliveries found.</td></tr>'}</table>
 <h2>Model</h2>
 <p>Last retraining: {number(summary['retraining']['last_run_at'] or 'not available')}<br>
-Last promoted model: {number(summary['retraining']['last_promoted_at'] or 'not available')}<br>{metric_text}</p>
+Last promoted model: {number(summary['retraining']['last_promoted_at'] or 'not available')}<br>{metric_text}<br>
+Training duration: {number(training_duration_text)}</p>
 <h3 style="font-size:15px;color:#173f5f">Retraining history</h3>
-<table style="width:100%;border-collapse:collapse"><tr><th align="left">Run</th><th align="left">Holdout</th><th align="left">Accuracy</th><th align="left">Recall</th><th align="left">F1</th><th align="left">Status</th></tr>{''.join(history_rows) or '<tr><td colspan="6">No retraining runs found.</td></tr>'}</table>
+<table style="width:100%;border-collapse:collapse"><tr><th align="left">Run</th><th align="left">Holdout</th><th align="left">Accuracy</th><th align="left">Recall</th><th align="left">F1</th><th align="left">Duration</th><th align="left">Status</th></tr>{''.join(history_rows) or '<tr><td colspan="7">No retraining runs found.</td></tr>'}</table>
 <h3 style="font-size:15px;color:#173f5f">Email commands</h3>
 <p>Reply to this summary with one command on the first line.<br></p>
 <ul><li><b>UNDO</b>: restore the last processing batch to INBOX.</li>
 <li><b>RETRAIN</b>: force a retraining attempt; an evaluation holdout is required.</li>
 <li><b>RELOAD MODEL</b>: reload the deployed classifier.</li>
+<li><b>RESTORE MODEL</b>: restore the replaced model if its one-week backup is available.</li>
+<li><b>LOGS &lt;1-2000&gt;</b>: append recent Cloud Run API logs as a text attachment.</li>
 <li><b>SUMMARY</b>: send an on-demand summary.</li></ul>
 </div></div>
 <style>h2{{font-size:18px;margin:22px 0 10px;color:#173f5f}}td,th{{padding:8px 6px;border-bottom:1px solid #e5e9ed;font-size:14px}}</style>

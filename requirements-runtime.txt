@@ -1,15 +1,12 @@
-# Core NLP & ML (full local training environment)
+# Install PyTorch CPU wheels instead of the CUDA-enabled PyPI build.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.1+cpu
+
+# NLP runtime and in-service retraining
 transformers==4.44.2
 accelerate>=0.21.0
-torch
-datasets
 scikit-learn
 numpy
-optuna
-
-# Evaluation plots (scripts/evaluate_classifier.py)
-matplotlib
-seaborn
 
 # FastAPI backend
 fastapi
@@ -25,7 +22,4 @@ beautifulsoup4
 google-cloud-storage
 google-cloud-logging
 google-auth
-
-# Database (SQLite helpers)
 sqlalchemy
-

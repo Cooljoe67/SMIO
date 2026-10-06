@@ -85,3 +85,29 @@ def upload_directory(source, prefix):
             relative_path = file_path.relative_to(source).as_posix()
             _bucket().blob(f"{prefix}/{relative_path}").upload_from_filename(file_path)
     return True
+
+
+def list_directory_prefixes(prefix):
+    """List immediate child directories under a GCS object prefix."""
+    if not enabled():
+        return []
+
+    object_prefix = prefix.rstrip("/") + "/"
+    child_directories = set()
+    for blob in _bucket().list_blobs(prefix=object_prefix):
+        relative_name = blob.name[len(object_prefix):]
+        if "/" in relative_name:
+            child_directories.add(relative_name.split("/", 1)[0])
+    return sorted(child_directories)
+
+
+def delete_directory(prefix):
+    """Delete all objects under one directory prefix."""
+    if not enabled():
+        return 0
+
+    object_prefix = prefix.rstrip("/") + "/"
+    blobs = list(_bucket().list_blobs(prefix=object_prefix))
+    for blob in blobs:
+        blob.delete()
+    return len(blobs)
