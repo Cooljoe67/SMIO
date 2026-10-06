@@ -1,4 +1,4 @@
-# Core NLP & ML
+# Core NLP & ML (full local training environment)
 transformers==4.44.2
 accelerate>=0.21.0
 torch
@@ -16,16 +16,15 @@ fastapi
 uvicorn[standard]
 pydantic-settings
 
-# Email handling (IMAP fetch/move, .env loading)
+# Email handling
 imap-tools
 python-dotenv
 
 # Utilities
 beautifulsoup4
 google-cloud-storage
-google-api-python-client
+google-cloud-logging
 google-auth
-google-auth-oauthlib
 
 # Database (SQLite helpers)
 sqlalchemy

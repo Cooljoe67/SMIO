@@ -141,11 +141,12 @@ def main():
     parser.add_argument(
         "--project",
         default=(
-            os.getenv("GOOGLE_CLOUD_PROJECT")
+            os.getenv("GCP_PROJECT_ID")
+            or os.getenv("GOOGLE_CLOUD_PROJECT")
             or os.getenv("CLOUDSDK_CORE_PROJECT")
-            or "smio-509409"
+            or ""
         ),
-        help="Google Cloud project for gcloud authentication (default: deployment project).",
+        help="Google Cloud project for gcloud authentication (default: GCP_PROJECT_ID).",
     )
     parser.add_argument(
         "--scheduler-job",
@@ -154,8 +155,8 @@ def main():
     )
     parser.add_argument(
         "--scheduler-location",
-        default="europe-west3",
-        help="Cloud Scheduler region (default: europe-west3).",
+        default=os.getenv("GCP_SCHEDULER_LOCATION") or os.getenv("GCP_REGION") or "",
+        help="Cloud Scheduler region (default: GCP_SCHEDULER_LOCATION or GCP_REGION).",
     )
     parser.add_argument(
         "--download-only",
@@ -176,6 +177,13 @@ def main():
         if args.download_only:
             print("Download-only mode; leaving 5 min job running.")
         else:
+            if not args.project:
+                raise SystemExit("Set GCP_PROJECT_ID in .env or pass --project.")
+            if not args.scheduler_location:
+                raise SystemExit(
+                    "Set GCP_SCHEDULER_LOCATION or GCP_REGION in .env, "
+                    "or pass --scheduler-location."
+                )
             print("Authenticating with Google Cloud...")
             _authenticate_with_gcloud(args.project)
             scheduler_paused = _pause_scheduler_job(

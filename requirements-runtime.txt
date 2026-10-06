@@ -1,0 +1,25 @@
+# Install PyTorch CPU wheels instead of the CUDA-enabled PyPI build.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.1+cpu
+
+# NLP runtime and in-service retraining
+transformers==4.44.2
+accelerate>=0.21.0
+scikit-learn
+numpy
+
+# FastAPI backend
+fastapi
+uvicorn[standard]
+pydantic-settings
+
+# Email handling
+imap-tools
+python-dotenv
+
+# Utilities
+beautifulsoup4
+google-cloud-storage
+google-cloud-logging
+google-auth
+sqlalchemy

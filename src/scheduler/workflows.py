@@ -14,7 +14,7 @@ from src.ai.retrain import retrain_if_due
 from src.api.utils.command_processor import process_instruction_mails
 from src.api.utils.imap_client import fetch_inbox
 from src.api.utils.inbox_processor import process_unprocessed_emails
-from src.api.utils.mailer import send_summary_email
+from src.api.utils.mailer import append_summary_to_inbox
 from src.db.database import SessionLocal
 from src.db.models import SummarySnapshot
 
@@ -73,7 +73,7 @@ def _send_summary(summary_date=None):
         summary = stored_daily_summary(db, summary_date)
         if summary is None:
             raise ValueError("No stored summary exists for this date; gather it first")
-        sent = send_summary_email(
+        sent = append_summary_to_inbox(
             summary["message"],
             html_body=summary.get("html_message"),
         )
@@ -123,7 +123,7 @@ def run_retraining(summary_date=None):
 
 
 def run_daily_workflow(summary_date=None):
-    """Gather, send, then retrain for one logical summary day."""
+    """Gather, append the summary to the inbox, then retrain."""
     def routine():
         summary = _gather_summary(summary_date)
         send_result = _send_summary(summary["summary_date"])

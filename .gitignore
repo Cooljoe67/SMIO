@@ -110,6 +110,7 @@ tmp/
 # ---------------------------------------------------------
 .env
 .env.*
+!.env.example
 .envrc
 
 # Local OAuth and deployment secrets

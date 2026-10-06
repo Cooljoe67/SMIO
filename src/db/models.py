@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean
+from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, Text
 from sqlalchemy.orm import declarative_base
 from datetime import datetime, timezone
 
@@ -93,4 +93,23 @@ class SummarySnapshot(Base):
     retrain_accuracy = Column(String, nullable=True)
     retrain_recall = Column(String, nullable=True)
     retrain_f1 = Column(String, nullable=True)
+
+
+class RetrainRun(Base):
+    __tablename__ = "retrain_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_key = Column(String, nullable=False, unique=True, index=True)
+    run_id = Column(Integer, nullable=True, index=True)
+    run_at = Column(String, nullable=False, index=True)
+    promoted = Column(Boolean, nullable=False, default=False)
+    eval_holdout_size = Column(Integer, nullable=True)
+    baseline_accuracy = Column(String, nullable=True)
+    baseline_recall_macro = Column(String, nullable=True)
+    baseline_f1 = Column(String, nullable=True)
+    new_accuracy = Column(String, nullable=True)
+    new_recall_macro = Column(String, nullable=True)
+    new_f1 = Column(String, nullable=True)
+    training_duration = Column(Float, nullable=True)
+    result_json = Column(Text, nullable=False)
 

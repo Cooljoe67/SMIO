@@ -13,7 +13,7 @@ from src.api.utils.imap_client import (
     move_email_to_classification_folder,
     move_email_to_inbox,
 )
-from src.api.utils.settings import email_settings, gmail_settings
+from src.api.utils.settings import email_settings
 
 
 logger = logging.getLogger(__name__)
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 def _is_smio_mail(sender):
     sender_address = parseaddr(sender or "")[1].strip().casefold()
-    smio_address = parseaddr(gmail_settings.from_address or "")[1].strip().casefold()
+    smio_address = parseaddr(email_settings.user or "")[1].strip().casefold()
     return bool(smio_address and sender_address == smio_address)
 
 

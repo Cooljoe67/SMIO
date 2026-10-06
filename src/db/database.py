@@ -167,6 +167,7 @@ def record_retrain_run(db, result, fallback=None):
         new_accuracy=_string_value(result.get("new_accuracy")),
         new_recall_macro=_string_value(result.get("new_recall_macro")),
         new_f1=_string_value(result.get("new_f1")),
+        training_duration=_float_value(result.get("training_duration")),
         result_json=json.dumps(persisted_result, default=str),
     ))
     db.flush()
@@ -177,10 +178,27 @@ def _string_value(value):
     return None if value is None else str(value)
 
 
+def _float_value(value):
+    return None if value is None else float(value)
+
+
 def ensure_retrain_run_table():
     from src.db.models import RetrainRun
 
+    existing_tables = set(inspect(engine).get_table_names())
     RetrainRun.__table__.create(bind=engine, checkfirst=True)
+    created = "retrain_runs" not in existing_tables
+    columns = {
+        column["name"] for column in inspect(engine).get_columns("retrain_runs")
+    }
+    if "training_duration" not in columns:
+        with engine.begin() as connection:
+            connection.execute(
+                text("ALTER TABLE retrain_runs ADD COLUMN training_duration REAL")
+            )
+        created = True
+    if created:
+        persist_database()
 
 
 def backfill_retrain_runs():

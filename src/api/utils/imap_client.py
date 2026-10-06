@@ -125,9 +125,19 @@ def cleanup_expired_mails(db, mailbox):
         candidates = db.query(Email).filter(
             Email.folder == folder_name,
             Email.date <= candidate_cutoff,
+            Email.is_training_data.is_(False),
         ).all()
 
         for email in candidates:
+            if not email.uid:
+                errors.append({"email_id": email.id, "error": "missing_imap_uid"})
+                logger.warning(
+                    "Skipping retention cleanup for email %s in %s: no IMAP UID",
+                    email.id,
+                    folder_name,
+                )
+                continue
+
             try:
                 mailbox.folder.set(folder_name, readonly=True)
                 current_message = next(
@@ -244,6 +254,7 @@ def sync_existing_mails():
                         changed += 1
             stale_emails = db.query(Email).filter(
                 Email.folder.in_(active_folders),
+                Email.is_training_data.is_(False),
                 (Email.last_seen_at.is_(None) | (Email.last_seen_at < sync_started)),
             ).all()
             for email in stale_emails:
