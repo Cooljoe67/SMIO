@@ -286,7 +286,7 @@ if (-not $repositoryExists) {
     )
 }
 
-# Every deploy pushes a ~2 GB image; keep the newest two and delete the rest after 7 days.
+# Every deploy pushes a ~2 GB image; keep the newest two and delete the rest after 1 day.
 Write-Host "Applying Artifact Registry cleanup policy..."
 Invoke-Gcloud @(
     "artifacts", "repositories", "set-cleanup-policies", $Repository,
