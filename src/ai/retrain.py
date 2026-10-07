@@ -29,6 +29,18 @@ from transformers import (
 
 from src.ai import classifier
 from src.ai.labels import ID2LABEL, LABEL2ID
+from src.ai.promotion_rules import (
+    PROMOTION_BOOTSTRAP_SAMPLES,
+    PROMOTION_F1_NONINFERIORITY_MARGIN,
+    PROMOTION_MAX_CLASS_RECALL_DROP,
+    PROMOTION_MIN_CLASS_SUPPORT,
+)
+from src.ai.retraining_explainer import (
+    explain_retraining,
+    explanation_html,
+    explanation_text_lines,
+    technical_lines,
+)
 from src.db.database import record_retrain_run
 from src.db.models import Email
 from src.storage import gcs
@@ -49,10 +61,6 @@ REPLAY_RATIO = 0.9
 HOLDOUT_RATIO = 0.15
 NUM_TRAIN_EPOCHS = 3
 BATCH_SIZE = 16
-PROMOTION_BOOTSTRAP_SAMPLES = 1000
-PROMOTION_F1_NONINFERIORITY_MARGIN = 0.02
-PROMOTION_MAX_CLASS_RECALL_DROP = 0.10
-PROMOTION_MIN_CLASS_SUPPORT = 10
 
 
 def _model_archive_name(timestamp=None):
@@ -441,83 +449,33 @@ def _load_holdout(db):
 
 
 def _append_retraining_result_notice(result):
-    promoted = bool(result.get("promoted"))
-    promotion_text = "Yes" if promoted else "No; the deployed model was kept"
+    explanation = explain_retraining(result)
     subject = (
         "SMIO retraining complete: model promoted"
-        if promoted
+        if result.get("promoted")
         else "SMIO retraining complete: model not promoted"
     )
-    metrics = (
-        ("Accuracy", "baseline_accuracy", "new_accuracy"),
-        ("Macro recall", "baseline_recall_macro", "new_recall_macro"),
-        ("Macro F1", "baseline_f1", "new_f1"),
-    )
-    metric_lines = [
-        f"- {label}: {result.get(before_key, 0):.3f} -> {result.get(after_key, 0):.3f}"
-        for label, before_key, after_key in metrics
-    ]
-    assessment = result.get("promotion_assessment") or {}
-    ci_lower = assessment.get("f1_delta_ci95_lower")
-    ci_upper = assessment.get("f1_delta_ci95_upper")
-    if ci_lower is None or ci_upper is None:
-        f1_interval_text = "not available"
-    else:
-        f1_interval_text = f"{ci_lower:+.3f} to {ci_upper:+.3f}"
-    per_class_recall = assessment.get("per_class_recall") or {}
-    recall_lines = [
-        f"- {label}: {values['baseline']:.3f} -> {values['candidate']:.3f} "
-        f"(n={values['support']}, delta={values['delta']:+.3f})"
-        for label, values in sorted(per_class_recall.items())
-    ]
     duration = max(float(result.get("training_duration") or 0), 0)
     duration_text = f"{duration / 60:.1f} minutes"
     run_text = str(result.get("run_at", "unknown"))
-    body = "\n".join([
-        "SMIO retraining completed.",
+    details = [
         f"Run: {run_text}",
-        f"Model promoted: {promotion_text}",
-        *metric_lines,
-        f"Macro F1 delta 95% paired-bootstrap CI: {f1_interval_text}",
-        "Promotion gate: macro F1 not lower; CI lower bound >= -0.020; "
-        "for classes with at least 10 holdout examples, recall drop <= 0.100.",
-        "Per-class recall (baseline -> candidate):",
-        *recall_lines,
+        *technical_lines(result),
         f"Training duration: {duration_text}",
+    ]
+    body = "\n".join([
+        *explanation_text_lines(explanation),
+        "",
+        "Technical details (for troubleshooting)",
+        *(f"- {line}" for line in details),
     ])
-    rows = "".join(
-        "<tr>"
-        f"<th align=\"left\">{escape(label)}</th>"
-        f"<td>{result.get(before_key, 0):.3f}</td>"
-        f"<td>{result.get(after_key, 0):.3f}</td>"
-        "</tr>"
-        for label, before_key, after_key in metrics
-    )
-    recall_rows = "".join(
-        "<tr>"
-        f"<th align=\"left\">{escape(label)}</th>"
-        f"<td>{values['support']}</td>"
-        f"<td>{values['baseline']:.3f}</td>"
-        f"<td>{values['candidate']:.3f}</td>"
-        f"<td>{values['delta']:+.3f}</td>"
-        "</tr>"
-        for label, values in sorted(per_class_recall.items())
-    )
     html_body = (
-        "<html><body><h2>SMIO retraining completed</h2>"
-        f"<p>Run: {escape(run_text)}<br>Model promoted: "
-        f"<b>{escape(promotion_text)}</b><br>Training duration: {duration_text}<br>"
-        f"Macro F1 delta 95% paired-bootstrap CI: {escape(f1_interval_text)}</p>"
-        "<p>Promotion gate: macro F1 not lower; CI lower bound &ge; -0.020; "
-        "for classes with at least 10 holdout examples, recall drop &le; 0.100.</p>"
-        "<table style=\"border-collapse:collapse\"><tr>"
-        "<th align=\"left\">Metric</th><th>Baseline</th><th>Candidate</th>"
-        f"</tr>{rows}</table>"
-        "<h3>Per-class recall</h3>"
-        "<table style=\"border-collapse:collapse\"><tr>"
-        "<th align=\"left\">Class</th><th>Holdout n</th><th>Baseline</th>"
-        "<th>Candidate</th><th>Delta</th>"
-        f"</tr>{recall_rows}</table></body></html>"
+        "<html><body style=\"font-family:Arial,sans-serif;color:#17212b\">"
+        f"{explanation_html(explanation)}"
+        "<div style=\"color:#667085;font-size:12px;margin-top:24px\">"
+        "<p><b>Technical details (for troubleshooting)</b></p><ul>"
+        + "".join(f"<li>{escape(line)}</li>" for line in details)
+        + "</ul></div></body></html>"
     )
 
     try:
@@ -674,6 +632,7 @@ def retrain_if_due(db, min_corrections=MIN_CORRECTIONS):
         "new_f1": new_metrics["f1_macro"],
         "training_duration": training_duration,
         "batch_sizes": batch_sizes,
+        "corrections_used": len(train_emails),
         "new_holdout_count": len(new_holdout_emails),
         "eval_holdout_size": len(eval_texts),
         "candidate_dir": str(candidate_dir) if promoted else None,
