@@ -307,6 +307,23 @@ def build_daily_summary(db, summary_date=None, persist=False):
             f"recall {_format_metric(metrics, 'recall_macro', 'new_recall_macro')}, "
             f"F1 {_format_metric(metrics, 'f1_macro', 'new_f1')}"
         )
+    promotion_f1 = _promotion_f1_details(metrics)
+    if promotion_f1:
+        lines.append(
+            "- Promotion F1: "
+            f"{promotion_f1['baseline']} -> {promotion_f1['candidate']} "
+            f"(delta {promotion_f1['delta']}; {promotion_f1['interval']})"
+        )
+    per_class_recall = _per_class_recall_details(metrics)
+    if per_class_recall:
+        lines.append("- Per-class recall (baseline -> candidate; holdout n):")
+        for item in per_class_recall:
+            baseline = "-" if item["baseline"] is None else f"{item['baseline']:.2f}"
+            candidate = "-" if item["candidate"] is None else f"{item['candidate']:.2f}"
+            lines.append(
+                f"  - {item['label']}: {baseline} -> {candidate} "
+                f"(n={item['support']})"
+            )
     lines.append(
         f"- Latest training duration: "
         f"{_format_training_duration(metrics.get('training_duration') if metrics else None)}"
@@ -346,6 +363,57 @@ def _format_metric(metrics, primary_key, fallback_key):
         return f"{float(value):.2f}"
     except (TypeError, ValueError):
         return "-"
+
+
+def _format_score(value, signed=False):
+    if value is None:
+        return "-"
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return "-"
+    return f"{score:+.2f}" if signed else f"{score:.2f}"
+
+
+def _promotion_f1_details(metrics):
+    baseline_f1 = _metric(metrics, "baseline_f1", "baseline_f1")
+    candidate_f1 = _metric(metrics, "new_f1", "f1_macro")
+    if baseline_f1 is None or candidate_f1 is None:
+        return None
+
+    assessment = metrics.get("promotion_assessment") or {}
+    delta = assessment.get("f1_delta")
+    if delta is None:
+        delta = float(candidate_f1) - float(baseline_f1)
+    lower = assessment.get("f1_delta_ci95_lower")
+    upper = assessment.get("f1_delta_ci95_upper")
+    interval = (
+        f"95% paired CI {float(lower):+.3f} to {float(upper):+.3f}"
+        if lower is not None and upper is not None
+        else "95% paired CI unavailable"
+    )
+    return {
+        "baseline": f"{float(baseline_f1):.3f}",
+        "candidate": f"{float(candidate_f1):.3f}",
+        "delta": f"{float(delta):+.3f}",
+        "interval": interval,
+    }
+
+
+def _per_class_recall_details(metrics):
+    assessment = (metrics or {}).get("promotion_assessment") or {}
+    per_class = assessment.get("per_class_recall") or {}
+    return [
+        {
+            "label": label,
+            "support": values.get("support", 0),
+            "baseline": values.get("baseline"),
+            "candidate": values.get("candidate"),
+            "delta": values.get("delta"),
+            "guarded": values.get("guarded", False),
+        }
+        for label, values in sorted(per_class.items())
+    ]
 
 
 def _format_training_duration(value):
@@ -449,6 +517,23 @@ def stored_daily_summary(db, summary_date=None):
             f"recall {_format_metric(metrics, 'recall_macro', 'new_recall_macro')}, "
             f"F1 {_format_metric(metrics, 'f1_macro', 'new_f1')}"
         )
+    promotion_f1 = _promotion_f1_details(metrics)
+    if promotion_f1:
+        message_lines.append(
+            "- Promotion F1: "
+            f"{promotion_f1['baseline']} -> {promotion_f1['candidate']} "
+            f"(delta {promotion_f1['delta']}; {promotion_f1['interval']})"
+        )
+    per_class_recall = _per_class_recall_details(metrics)
+    if per_class_recall:
+        message_lines.append("- Per-class recall (baseline -> candidate; holdout n):")
+        for item in per_class_recall:
+            baseline = "-" if item["baseline"] is None else f"{item['baseline']:.2f}"
+            candidate = "-" if item["candidate"] is None else f"{item['candidate']:.2f}"
+            message_lines.append(
+                f"  - {item['label']}: {baseline} -> {candidate} "
+                f"(n={item['support']})"
+            )
     message_lines.append(
         f"- Latest training duration: "
         f"{_format_training_duration(metrics.get('training_duration') if metrics else None)}"
@@ -535,18 +620,47 @@ def _format_html_summary(summary):
             f"Recall: {number(_format_metric(metrics, 'recall_macro', 'new_recall_macro'))} · "
             f"F1: {number(_format_metric(metrics, 'f1_macro', 'new_f1'))}"
         )
+    promotion_f1 = _promotion_f1_details(metrics)
+    promotion_f1_text = "Baseline-to-candidate F1: not available"
+    if promotion_f1:
+        promotion_f1_text = (
+            f"Baseline-to-candidate F1: {promotion_f1['baseline']} -> "
+            f"{promotion_f1['candidate']} (delta {promotion_f1['delta']}; "
+            f"{promotion_f1['interval']})"
+        )
+    per_class_recall = _per_class_recall_details(metrics)
+    per_class_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(item['label'].title())}</td>"
+        f"<td>{number(item['support'])}</td>"
+        f"<td>{number(_format_score(item['baseline']))}</td>"
+        f"<td>{number(_format_score(item['candidate']))}</td>"
+        f"<td>{number(_format_score(item['delta'], signed=True))}</td>"
+        "</tr>"
+        for item in per_class_recall
+    )
     training_duration_text = _format_training_duration(
         metrics.get("training_duration") if metrics else None
     )
     history_rows = []
     for entry in reversed(summary["retraining"]["history"]):
+        history_f1 = _promotion_f1_details(entry)
+        if history_f1:
+            baseline_f1 = history_f1["baseline"]
+            candidate_f1 = history_f1["candidate"]
+            f1_delta = f"{history_f1['delta']}; {history_f1['interval']}"
+        else:
+            baseline_f1 = "-"
+            candidate_f1 = _format_metric(entry, "new_f1", "f1")
+            f1_delta = "-"
         history_rows.append(
             "<tr>"
             f"<td>{number(_display_value(entry.get('run_at') or entry.get('run_id')))}</td>"
             f"<td>{number(_display_value(entry.get('eval_holdout_size')))}</td>"
             f"<td>{number(_format_metric(entry, 'new_accuracy', 'accuracy'))}</td>"
             f"<td>{number(_format_metric(entry, 'new_recall_macro', 'recall_macro'))}</td>"
-            f"<td>{number(_format_metric(entry, 'new_f1', 'f1'))}</td>"
+            f"<td>{number(baseline_f1)} -> {number(candidate_f1)}</td>"
+            f"<td>{number(f1_delta)}</td>"
             f"<td>{number(_format_training_duration(entry.get('training_duration')))}</td>"
             f"<td>{'promoted' if entry.get('promoted') else 'kept as candidate'}</td>"
             "</tr>"
@@ -574,9 +688,11 @@ def _format_html_summary(summary):
 <h2>Model</h2>
 <p>Last retraining: {number(summary['retraining']['last_run_at'] or 'not available')}<br>
 Last promoted model: {number(summary['retraining']['last_promoted_at'] or 'not available')}<br>{metric_text}<br>
-Training duration: {number(training_duration_text)}</p>
+{number(promotion_f1_text)}<br>Training duration: {number(training_duration_text)}</p>
+<h3 style="font-size:15px;color:#173f5f">Latest per-class recall</h3>
+<table style="width:100%;border-collapse:collapse"><tr><th align="left">Class</th><th>Holdout n</th><th>Baseline recall</th><th>Candidate recall</th><th>Delta</th></tr>{''.join(per_class_rows) or '<tr><td colspan="5">No per-class comparison stored for this run.</td></tr>'}</table>
 <h3 style="font-size:15px;color:#173f5f">Retraining history</h3>
-<table style="width:100%;border-collapse:collapse"><tr><th align="left">Run</th><th align="left">Holdout</th><th align="left">Accuracy</th><th align="left">Recall</th><th align="left">F1</th><th align="left">Duration</th><th align="left">Status</th></tr>{''.join(history_rows) or '<tr><td colspan="7">No retraining runs found.</td></tr>'}</table>
+<table style="width:100%;border-collapse:collapse"><tr><th align="left">Run</th><th align="left">Holdout</th><th align="left">Accuracy</th><th align="left">Recall</th><th align="left">F1 baseline -> candidate</th><th align="left">Delta / 95% CI</th><th align="left">Duration</th><th align="left">Status</th></tr>{''.join(history_rows) or '<tr><td colspan="8">No retraining runs found.</td></tr>'}</table>
 <h3 style="font-size:15px;color:#173f5f">Email commands</h3>
 <p>Reply to this summary with one command on the first line.<br></p>
 <ul><li><b>UNDO [n]</b>: restore the mails of the last n processing batches (default 1, max 20) to INBOX.</li>
