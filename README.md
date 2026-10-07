@@ -219,7 +219,8 @@ Run these commands from the repository root.
 [scripts/deploy.ps1](scripts/deploy.ps1) reuses an active Google Cloud SDK login
 (or prompts for login if needed), starts Docker Desktop if it is not running, and
 waits for the Docker engine before building and pushing the image to Artifact
-Registry. It grants the runtime service account access to Secret Manager and GCS,
+Registry. It applies the cleanup policy in [scripts/artifact-cleanup-policy.json](scripts/artifact-cleanup-policy.json)
+(keep the newest two images, delete older ones after 7 days). It grants the runtime service account access to Secret Manager and GCS,
 and read-only Cloud Logging access for the `LOGS` email command. It then deploys
 Cloud Run with the required single-instance SQLite settings.
 Before deploying, it pauses the configured daily and five-minute Scheduler jobs,
