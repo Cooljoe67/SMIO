@@ -5,8 +5,8 @@
     "mostRecentVersions": {"keepCount": 2}
   },
   {
-    "name": "delete-older-than-7-days",
+    "name": "delete-older-than-1-day",
     "action": {"type": "Delete"},
-    "condition": {"tagState": "any", "olderThan": "7d"}
+    "condition": {"tagState": "any", "olderThan": "1d"}
   }
 ]

@@ -220,7 +220,7 @@ Run these commands from the repository root.
 (or prompts for login if needed), starts Docker Desktop if it is not running, and
 waits for the Docker engine before building and pushing the image to Artifact
 Registry. It applies the cleanup policy in [scripts/artifact-cleanup-policy.json](scripts/artifact-cleanup-policy.json)
-(keep the newest two images, delete older ones after 7 days). It grants the runtime service account access to Secret Manager and GCS,
+(keep the newest two images, delete older ones after 1 day). It grants the runtime service account access to Secret Manager and GCS,
 and read-only Cloud Logging access for the `LOGS` email command. It then deploys
 Cloud Run with the required single-instance SQLite settings.
 Before deploying, it pauses the configured daily and five-minute Scheduler jobs,
