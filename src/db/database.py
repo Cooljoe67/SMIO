@@ -1,8 +1,9 @@
 import json
 import os
+import threading
 from pathlib import Path
 
-from sqlalchemy import create_engine, event, inspect, text
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 
 from src.storage import gcs
@@ -13,9 +14,23 @@ DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DATABASE_PATH.as_posix()}"
 DATABASE_GCS_OBJECT = os.getenv("GCS_DATABASE_OBJECT", "databases/smio.db")
 USING_SQLITE = DATABASE_URL.startswith("sqlite:")
 
+_publish_lock = threading.Lock()
+_published_signature = None
+
+
+def _database_signature():
+    """Modification time and size of the local SQLite file, or None if missing."""
+    try:
+        stat = DATABASE_PATH.stat()
+    except FileNotFoundError:
+        return None
+    return stat.st_mtime_ns, stat.st_size
+
+
 if gcs.enabled() and USING_SQLITE:
     if not gcs.download_file(DATABASE_GCS_OBJECT, DATABASE_PATH) and DATABASE_PATH.exists():
         gcs.upload_file(DATABASE_PATH, DATABASE_GCS_OBJECT)
+    _published_signature = _database_signature()
 
 engine = create_engine(
     DATABASE_URL, connect_args={"check_same_thread": False} if USING_SQLITE else {}
@@ -25,14 +40,23 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
 def persist_database():
-    """Publish the committed local SQLite database to GCS when configured."""
-    if gcs.enabled() and USING_SQLITE and DATABASE_PATH.exists():
+    """Publish the local SQLite database to GCS if it changed since the last publish.
+
+    Called once at the end of each workflow and request rather than after every
+    commit: each upload sends the whole file. Returns whether it uploaded.
+    """
+    global _published_signature
+    if not (gcs.enabled() and USING_SQLITE):
+        return False
+    with _publish_lock:
+        # Read the signature before uploading so a write during the upload is
+        # still detected by the next call.
+        signature = _database_signature()
+        if signature is None or signature == _published_signature:
+            return False
         gcs.upload_file(DATABASE_PATH, DATABASE_GCS_OBJECT)
-
-
-@event.listens_for(SessionLocal, "after_commit")
-def _persist_committed_database(session):
-    persist_database()
+        _published_signature = signature
+        return True
 
 
 def ensure_email_columns():
