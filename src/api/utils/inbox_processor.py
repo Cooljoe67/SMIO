@@ -182,18 +182,52 @@ def process_unprocessed_emails(db: Session):
     return batch_id, results, errors
 
 
-def undo_last_processing(db: Session):
-    last_batch_id = (
-        db.query(func.max(Email.processing_batch))
-        .filter(Email.processing_batch > 0)
-        .scalar()
+MAX_UNDO_BATCHES = 20
+
+
+def _latest_batch_ids(db: Session, count: int):
+    """Most recent batches that moved at least one non-SMIO mail, newest first."""
+    rows = (
+        db.query(Email.processing_batch)
+        .filter(
+            Email.processing_batch > 0,
+            Email.removed_at.is_(None),
+            or_(
+                Email.classification_source.is_(None),
+                Email.classification_source != "system",
+            ),
+        )
+        .distinct()
+        .order_by(Email.processing_batch.desc())
+        .limit(count)
+        .all()
     )
-    if last_batch_id is None:
-        return None, [], []
+    return [batch_id for (batch_id,) in rows]
+
+
+def undo_processing_batches(db: Session, count: int = 1):
+    """Restore the mails of the last ``count`` processing batches to INBOX.
+
+    Restored mails keep their processed count, so the next run does not file them
+    away again. SMIO's own mails and mails already removed are left untouched.
+    """
+    if not 1 <= count <= MAX_UNDO_BATCHES:
+        raise ValueError(f"count must be between 1 and {MAX_UNDO_BATCHES}")
+
+    batch_ids = _latest_batch_ids(db, count)
+    if not batch_ids:
+        return [], [], []
 
     emails = (
         db.query(Email)
-        .filter(Email.processing_batch == last_batch_id)
+        .filter(
+            Email.processing_batch.in_(batch_ids),
+            Email.removed_at.is_(None),
+            or_(
+                Email.classification_source.is_(None),
+                Email.classification_source != "system",
+            ),
+        )
         .all()
     )
     restored = []
@@ -205,26 +239,29 @@ def undo_last_processing(db: Session):
     ) as mailbox:
         for email in emails:
             try:
-                move_email_to_inbox(mailbox, email)
+                new_uid = move_email_to_inbox(mailbox, email)
+                if new_uid:
+                    email.uid = new_uid
+                else:
+                    logger.warning(
+                        "Email %s: INBOX UID unknown after undo; next sync will resolve it",
+                        email.id,
+                    )
                 email.folder = "INBOX"
-                email.processed = max(int(email.processed or 0) - 1, 0)
                 email.processing_batch = None
                 email.classification_source = "undo"
+                db.commit()
                 restored.append(email.id)
-                logger.info(
-                    "Email %s restored to INBOX (processed count=%s)",
-                    email.id,
-                    email.processed,
-                )
+                logger.info("Email %s restored to INBOX (uid=%s)", email.id, email.uid)
             except Exception as error:
+                db.rollback()
                 errors.append({"email_id": email.id, "error": str(error)})
                 logger.exception("Could not undo processing for email %s", email.id)
 
-    db.commit()
     logger.info(
-        "Undo batch %s finished: %d restored, %d failed",
-        last_batch_id,
+        "Undo of batches %s finished: %d restored, %d failed",
+        batch_ids,
         len(restored),
         len(errors),
     )
-    return last_batch_id, restored, errors
+    return batch_ids, restored, errors

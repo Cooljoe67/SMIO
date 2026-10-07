@@ -11,7 +11,7 @@ SMIO connects to your mailbox via IMAP, classifies incoming mails with a fine-tu
 - **AI-based email classification** — categorizes mail as `delivery`, `commercial`, `social`, `tech`, or `other` with a fine-tuned DistilBERT model.
 - **Delivery extraction** — identifies tracking and order details with a token-classification NER model and rule-based fallbacks.
 - **Inbox automation** — files messages by category, applies read/unread retention rules, records manual folder moves as corrections, and supports undo.
-- **Email commands** — accepts `UNDO`, `RETRAIN`, `RELOAD MODEL`, `RESTORE MODEL`, `LOGS <1-2000>`, and `SUMMARY` from the configured mailbox; commands are moved to Trash before execution, with failure notices for errors and timed-out attempts.
+- **Email commands** — accepts `UNDO [n]`, `RETRAIN`, `RELOAD MODEL`, `RESTORE MODEL`, `LOGS <1-2000>`, and `SUMMARY` from the configured mailbox; commands are moved to Trash before execution, with failure notices for errors and timed-out attempts.
 - **Daily summaries** — stores logical-day snapshots, delivery details, and retraining status. Display dates use `DD/MM/YYYY`; seed training data is excluded from mailbox counts.
 - **Replay-buffer retraining** — learns from manual corrections mixed with earlier labeled mail, discards rejected candidates, and promotes only when macro-F1 is no worse, the paired-bootstrap 95% lower bound is within a 2-point non-inferiority margin, and no class with at least 10 holdout examples loses more than 10 points of recall. Replaced models are archived in GCS for seven days and can be restored by email command.
 - **Local and cloud operation** — run locally or on Cloud Run with Cloud Scheduler; Cloud Run loads the classifier from GCS, while local images include a classifier fallback.
@@ -375,7 +375,7 @@ GCS continues to store the deployed classifier model.
 | GET | `/imap/fetch` | Sync folders and fetch new INBOX mails |
 | GET | `/imap/sync` | Reconcile known messages across all classification folders |
 | POST | `/inbox/process_unprocessed` | Classify + extract entities + move all unprocessed mails |
-| POST | `/inbox/undo_last_processing` | Revert the last processing batch, restore mails to INBOX |
+| POST | `/inbox/undo_last_processing?count=n` | Restore the mails of the last `n` processing batches (default 1, max 20) to INBOX |
 | GET | `/summary/daily?summary_date=YYYY-MM-DD` | Return a stored snapshot or generate a preview |
 | POST | `/jobs/five-minute` | Cloud Scheduler: fetch and process new mail |
 | POST | `/jobs/daily` | Cloud Scheduler: gather, append to inbox, and retrain |

@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime, timedelta, timezone
 
-from imap_tools import MailBox
+from imap_tools import AND, H, MailBox
 from src.db.database import SessionLocal
 from src.db.models import Email
 
@@ -51,10 +51,11 @@ def move_email_to_classification_folder(mailbox, email):
 
 
 def move_email_to_inbox(mailbox, email):
+    """Move a mail back to INBOX and return its INBOX UID (None if unknown)."""
     if not email.uid:
         raise ValueError(f"Email {email.id} has no IMAP UID")
     if not email.folder or email.folder == "INBOX":
-        return "INBOX"
+        return email.uid
 
     source_folder = email.folder
     if not mailbox.folder.exists(source_folder):
@@ -62,7 +63,12 @@ def move_email_to_inbox(mailbox, email):
     mailbox.folder.set(source_folder, readonly=False)
     mailbox.move([email.uid], "INBOX")
     mailbox.folder.set("INBOX", readonly=False)
-    return "INBOX"
+
+    # UIDs are per folder: the old one may now belong to another INBOX mail.
+    if not email.message_id:
+        return None
+    uids = mailbox.uids(AND(header=H("Message-ID", email.message_id)))
+    return uids[-1] if uids else None
 
 
 def _folder_names(mailbox):

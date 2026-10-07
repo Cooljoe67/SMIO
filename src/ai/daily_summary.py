@@ -110,7 +110,7 @@ def _email_command_help_lines():
         "Email commands",
         "Reply to this summary with one command on the first line; optionally prefix it with 'SMIO:'.",
         "Use a summary reply subject (for example, AW: SMIO Daily Summary) or the fallback subject 'SMIO Command'.",
-        "- UNDO: restore the last processing batch to INBOX.",
+        "- UNDO [n]: restore the mails of the last n processing batches (default 1, max 20) to INBOX.",
         "- RETRAIN: force a retraining attempt; an evaluation holdout is required.",
         "- RELOAD MODEL: reload the deployed classifier.",
         "- RESTORE MODEL: restore the replaced model if its one-week backup is available.",
@@ -579,7 +579,7 @@ Training duration: {number(training_duration_text)}</p>
 <table style="width:100%;border-collapse:collapse"><tr><th align="left">Run</th><th align="left">Holdout</th><th align="left">Accuracy</th><th align="left">Recall</th><th align="left">F1</th><th align="left">Duration</th><th align="left">Status</th></tr>{''.join(history_rows) or '<tr><td colspan="7">No retraining runs found.</td></tr>'}</table>
 <h3 style="font-size:15px;color:#173f5f">Email commands</h3>
 <p>Reply to this summary with one command on the first line.<br></p>
-<ul><li><b>UNDO</b>: restore the last processing batch to INBOX.</li>
+<ul><li><b>UNDO [n]</b>: restore the mails of the last n processing batches (default 1, max 20) to INBOX.</li>
 <li><b>RETRAIN</b>: force a retraining attempt; an evaluation holdout is required.</li>
 <li><b>RELOAD MODEL</b>: reload the deployed classifier.</li>
 <li><b>RESTORE MODEL</b>: restore the replaced model if its one-week backup is available.</li>
