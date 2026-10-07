@@ -286,6 +286,15 @@ if (-not $repositoryExists) {
     )
 }
 
+# Every deploy pushes a ~2 GB image; keep the newest two and delete the rest after 7 days.
+Write-Host "Applying Artifact Registry cleanup policy..."
+Invoke-Gcloud @(
+    "artifacts", "repositories", "set-cleanup-policies", $Repository,
+    "--location=$Region", "--project=$ProjectId",
+    "--policy=$(Join-Path $PSScriptRoot 'artifact-cleanup-policy.json')",
+    "--no-dry-run"
+)
+
 Invoke-Gcloud @("auth", "configure-docker", $ArtifactRegistryHost, "--quiet")
 
 Write-Host "Building Docker image..."
