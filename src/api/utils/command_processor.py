@@ -27,7 +27,7 @@ from src.db.database import SessionLocal
 from src.storage import gcs
 
 from .folder_rules import TRASH_FOLDER
-from .inbox_processor import undo_last_processing
+from .inbox_processor import MAX_UNDO_BATCHES, undo_processing_batches
 from .mailer import append_summary_to_inbox
 from .settings import email_settings
 
@@ -49,7 +49,7 @@ _COMMAND_SUBJECTS = {
     "smio command",
 }
 _COMMAND_PATTERN = re.compile(
-    r"^\s*(?:smio\s*:\s*)?(undo|retrain|reload\s+model|restore\s+model|summary|logs\s+\d+)(?=$|\s)",
+    r"^\s*(?:smio\s*:\s*)?(undo(?:\s+\d+)?|retrain|reload\s+model|restore\s+model|summary|logs\s+\d+)(?=$|\s)",
     re.IGNORECASE,
 )
 
@@ -73,9 +73,13 @@ def _normalize_command(subject, body):
 
 
 def _run_command(db, command):
-    if command == "undo":
-        batch_id, restored, errors = undo_last_processing(db)
-        return {"command": command, "batch_id": batch_id, "restored": len(restored), "errors": errors}
+    if command == "undo" or command.startswith("undo "):
+        parts = command.split(maxsplit=1)
+        count = int(parts[1]) if len(parts) > 1 else 1
+        if not 1 <= count <= MAX_UNDO_BATCHES:
+            return {"command": command, "error": f"UNDO accepts a batch count from 1 to {MAX_UNDO_BATCHES}."}
+        batch_ids, restored, errors = undo_processing_batches(db, count)
+        return {"command": command, "batch_ids": batch_ids, "restored": len(restored), "errors": errors}
 
     if command == "retrain":
         result = retrain_if_due(db, min_corrections=0)
