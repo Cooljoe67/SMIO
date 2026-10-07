@@ -1,6 +1,7 @@
 import logging
 
 from fastapi import FastAPI
+from .middleware import publish_database_changes
 from .routers import imap, inbox, jobs, summary
 
 from src.db.database import (
@@ -8,6 +9,7 @@ from src.db.database import (
     engine,
     ensure_email_columns,
     ensure_summary_snapshot_columns,
+    persist_database,
 )
 from src.db.models import Base
 
@@ -17,6 +19,7 @@ Base.metadata.create_all(bind=engine)
 ensure_email_columns()
 ensure_summary_snapshot_columns()
 backfill_retrain_runs()
+persist_database()
 
 
 app = FastAPI(
@@ -25,6 +28,8 @@ app = FastAPI(
     version="0.4.0"
 )
 
+
+app.middleware("http")(publish_database_changes)
 app.include_router(inbox.router)
 app.include_router(summary.router)
 app.include_router(imap.router)

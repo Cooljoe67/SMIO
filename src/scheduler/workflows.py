@@ -15,7 +15,7 @@ from src.api.utils.command_processor import process_instruction_mails
 from src.api.utils.imap_client import fetch_inbox
 from src.api.utils.inbox_processor import process_unprocessed_emails
 from src.api.utils.mailer import append_summary_to_inbox
-from src.db.database import SessionLocal
+from src.db.database import SessionLocal, persist_database
 from src.db.models import SummarySnapshot
 
 logger = logging.getLogger(__name__)
@@ -28,7 +28,17 @@ def _run_exclusively(name, routine):
         return {"skipped": True, "reason": "workflow_in_progress"}
 
     try:
-        return routine()
+        try:
+            result = routine()
+        except Exception:
+            # Keep what was committed before the failure, but report the original error.
+            try:
+                persist_database()
+            except Exception:
+                logger.exception("Could not publish the database after %s failed", name)
+            raise
+        persist_database()
+        return result
     finally:
         _workflow_lock.release()
 
