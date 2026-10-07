@@ -9,6 +9,12 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import func
 
+from src.ai.retraining_explainer import (
+    explain_retraining,
+    explanation_html,
+    explanation_text_lines,
+    technical_lines,
+)
 from src.api.utils.folder_rules import CLASSIFICATION_FOLDERS
 from src.api.utils.settings import app_settings
 from src.db.models import Email, RetrainRun, SummarySnapshot
@@ -66,6 +72,38 @@ def _format_datetime(value):
         value = value.replace(tzinfo=timezone.utc)
     value = value.astimezone(_summary_zone())
     return value.strftime("%d/%m/%Y %H:%M")
+
+
+def _format_run_time(value):
+    """Format a retraining run timestamp (e.g. 20261006_031200, UTC) for display."""
+    if not value:
+        return "not available"
+    try:
+        parsed = datetime.strptime(str(value), "%Y%m%d_%H%M%S")
+    except ValueError:
+        try:
+            return _format_datetime(value)
+        except ValueError:
+            return str(value)
+    return _format_datetime(parsed.replace(tzinfo=timezone.utc))
+
+
+def _model_and_footer_lines(retraining):
+    """Plain-text model section, email commands and technical details."""
+    metrics = retraining["last_metrics"]
+    lines = explanation_text_lines(explain_retraining(metrics))
+    lines.append(f"Last model update: {_format_run_time(retraining['last_run_at'])}")
+    lines.append(
+        f"New version last put in use: {_format_run_time(retraining['last_promoted_at'])}"
+    )
+    lines.extend(_email_command_help_lines())
+    if metrics:
+        lines.extend(("", "Technical details (for troubleshooting)"))
+        lines.extend(f"- {line}" for line in technical_lines(metrics))
+        lines.append(
+            f"- Training duration: {_format_training_duration(metrics.get('training_duration'))}"
+        )
+    return lines
 
 
 def _format_display_date(value):
@@ -297,38 +335,7 @@ def build_daily_summary(db, summary_date=None, persist=False):
             + ", ".join(deliveries["delivered_since_summary"])
         )
     lines.extend(("", "Model"))
-    lines.append(f"- Last retraining: {retraining['last_run_at'] or 'not available'}")
-    lines.append(f"- Last promoted model: {retraining['last_promoted_at'] or 'not available'}")
-    metrics = retraining["last_metrics"]
-    if metrics:
-        lines.append(
-            "- Latest metrics: "
-            f"accuracy {_format_metric(metrics, 'accuracy', 'new_accuracy')}, "
-            f"recall {_format_metric(metrics, 'recall_macro', 'new_recall_macro')}, "
-            f"F1 {_format_metric(metrics, 'f1_macro', 'new_f1')}"
-        )
-    promotion_f1 = _promotion_f1_details(metrics)
-    if promotion_f1:
-        lines.append(
-            "- Promotion F1: "
-            f"{promotion_f1['baseline']} -> {promotion_f1['candidate']} "
-            f"(delta {promotion_f1['delta']}; {promotion_f1['interval']})"
-        )
-    per_class_recall = _per_class_recall_details(metrics)
-    if per_class_recall:
-        lines.append("- Per-class recall (baseline -> candidate; holdout n):")
-        for item in per_class_recall:
-            baseline = "-" if item["baseline"] is None else f"{item['baseline']:.2f}"
-            candidate = "-" if item["candidate"] is None else f"{item['candidate']:.2f}"
-            lines.append(
-                f"  - {item['label']}: {baseline} -> {candidate} "
-                f"(n={item['support']})"
-            )
-    lines.append(
-        f"- Latest training duration: "
-        f"{_format_training_duration(metrics.get('training_duration') if metrics else None)}"
-    )
-    lines.extend(_email_command_help_lines())
+    lines.extend(_model_and_footer_lines(retraining))
 
     summary = {
         "summary_date": logical_date.isoformat(),
@@ -365,16 +372,6 @@ def _format_metric(metrics, primary_key, fallback_key):
         return "-"
 
 
-def _format_score(value, signed=False):
-    if value is None:
-        return "-"
-    try:
-        score = float(value)
-    except (TypeError, ValueError):
-        return "-"
-    return f"{score:+.2f}" if signed else f"{score:.2f}"
-
-
 def _promotion_f1_details(metrics):
     baseline_f1 = _metric(metrics, "baseline_f1", "baseline_f1")
     candidate_f1 = _metric(metrics, "new_f1", "f1_macro")
@@ -398,22 +395,6 @@ def _promotion_f1_details(metrics):
         "delta": f"{float(delta):+.3f}",
         "interval": interval,
     }
-
-
-def _per_class_recall_details(metrics):
-    assessment = (metrics or {}).get("promotion_assessment") or {}
-    per_class = assessment.get("per_class_recall") or {}
-    return [
-        {
-            "label": label,
-            "support": values.get("support", 0),
-            "baseline": values.get("baseline"),
-            "candidate": values.get("candidate"),
-            "delta": values.get("delta"),
-            "guarded": values.get("guarded", False),
-        }
-        for label, values in sorted(per_class.items())
-    ]
 
 
 def _format_training_duration(value):
@@ -502,43 +483,7 @@ def stored_daily_summary(db, summary_date=None):
         message_lines = message_lines[:message_lines.index("Model") + 1]
     else:
         message_lines.extend(("", "Model"))
-    retraining = summary["retraining"]
-    message_lines.append(
-        f"- Last retraining: {retraining['last_run_at'] or 'not available'}"
-    )
-    message_lines.append(
-        f"- Last promoted model: {retraining['last_promoted_at'] or 'not available'}"
-    )
-    metrics = retraining["last_metrics"]
-    if metrics:
-        message_lines.append(
-            "- Latest metrics: "
-            f"accuracy {_format_metric(metrics, 'accuracy', 'new_accuracy')}, "
-            f"recall {_format_metric(metrics, 'recall_macro', 'new_recall_macro')}, "
-            f"F1 {_format_metric(metrics, 'f1_macro', 'new_f1')}"
-        )
-    promotion_f1 = _promotion_f1_details(metrics)
-    if promotion_f1:
-        message_lines.append(
-            "- Promotion F1: "
-            f"{promotion_f1['baseline']} -> {promotion_f1['candidate']} "
-            f"(delta {promotion_f1['delta']}; {promotion_f1['interval']})"
-        )
-    per_class_recall = _per_class_recall_details(metrics)
-    if per_class_recall:
-        message_lines.append("- Per-class recall (baseline -> candidate; holdout n):")
-        for item in per_class_recall:
-            baseline = "-" if item["baseline"] is None else f"{item['baseline']:.2f}"
-            candidate = "-" if item["candidate"] is None else f"{item['candidate']:.2f}"
-            message_lines.append(
-                f"  - {item['label']}: {baseline} -> {candidate} "
-                f"(n={item['support']})"
-            )
-    message_lines.append(
-        f"- Latest training duration: "
-        f"{_format_training_duration(metrics.get('training_duration') if metrics else None)}"
-    )
-    message_lines.extend(_email_command_help_lines())
+    message_lines.extend(_model_and_footer_lines(summary["retraining"]))
     summary["message"] = "\n".join(message_lines)
     summary["html_message"] = _format_html_summary(summary)
     summary["sent_at"] = snapshot.sent_at.isoformat() if snapshot.sent_at else None
@@ -613,35 +558,28 @@ def _format_html_summary(summary):
             "</tr>"
         )
     metrics = summary["retraining"]["last_metrics"]
-    metric_text = "No retraining metrics available yet."
-    if metrics:
-        metric_text = (
-            f"Accuracy: {number(_format_metric(metrics, 'accuracy', 'new_accuracy'))} · "
-            f"Recall: {number(_format_metric(metrics, 'recall_macro', 'new_recall_macro'))} · "
-            f"F1: {number(_format_metric(metrics, 'f1_macro', 'new_f1'))}"
-        )
-    promotion_f1 = _promotion_f1_details(metrics)
-    promotion_f1_text = "Baseline-to-candidate F1: not available"
-    if promotion_f1:
-        promotion_f1_text = (
-            f"Baseline-to-candidate F1: {promotion_f1['baseline']} -> "
-            f"{promotion_f1['candidate']} (delta {promotion_f1['delta']}; "
-            f"{promotion_f1['interval']})"
-        )
-    per_class_recall = _per_class_recall_details(metrics)
-    per_class_rows = "".join(
-        "<tr>"
-        f"<td>{html.escape(item['label'].title())}</td>"
-        f"<td>{number(item['support'])}</td>"
-        f"<td>{number(_format_score(item['baseline']))}</td>"
-        f"<td>{number(_format_score(item['candidate']))}</td>"
-        f"<td>{number(_format_score(item['delta'], signed=True))}</td>"
-        "</tr>"
-        for item in per_class_recall
+    model_html = explanation_html(explain_retraining(metrics))
+    technical_items = "".join(
+        f"<li>{number(line)}</li>" for line in (technical_lines(metrics) if metrics else [])
     )
     training_duration_text = _format_training_duration(
         metrics.get("training_duration") if metrics else None
     )
+    update_rows = []
+    for entry in reversed(summary["retraining"]["history"]):
+        explanation = explain_retraining(entry)
+        if explanation is None:
+            continue
+        accuracy = _metric(entry, "new_accuracy", "accuracy")
+        sorted_text = "-" if accuracy is None else f"{round(float(accuracy) * 100)} of 100"
+        update_rows.append(
+            "<tr>"
+            f"<td>{number(_format_run_time(entry.get('run_at')))}</td>"
+            f"<td>{'In use' if explanation['promoted'] else 'Not used'}</td>"
+            f"<td>{number(explanation['short_reason'])}</td>"
+            f"<td>{number(sorted_text)}</td>"
+            "</tr>"
+        )
     history_rows = []
     for entry in reversed(summary["retraining"]["history"]):
         history_f1 = _promotion_f1_details(entry)
@@ -686,13 +624,11 @@ def _format_html_summary(summary):
 <p>Due today: <b>{number(summary['deliveries']['today_count'])}</b></p>
 <table style="width:100%;border-collapse:collapse"><tr><th align="left">Date</th><th align="left">Item</th><th align="left">Company</th><th align="left">Status</th></tr>{''.join(delivery_rows) or '<tr><td colspan="4">No upcoming deliveries found.</td></tr>'}</table>
 <h2>Model</h2>
-<p>Last retraining: {number(summary['retraining']['last_run_at'] or 'not available')}<br>
-Last promoted model: {number(summary['retraining']['last_promoted_at'] or 'not available')}<br>{metric_text}<br>
-{number(promotion_f1_text)}<br>Training duration: {number(training_duration_text)}</p>
-<h3 style="font-size:15px;color:#173f5f">Latest per-class recall</h3>
-<table style="width:100%;border-collapse:collapse"><tr><th align="left">Class</th><th>Holdout n</th><th>Baseline recall</th><th>Candidate recall</th><th>Delta</th></tr>{''.join(per_class_rows) or '<tr><td colspan="5">No per-class comparison stored for this run.</td></tr>'}</table>
-<h3 style="font-size:15px;color:#173f5f">Retraining history</h3>
-<table style="width:100%;border-collapse:collapse"><tr><th align="left">Run</th><th align="left">Holdout</th><th align="left">Accuracy</th><th align="left">Recall</th><th align="left">F1 baseline -> candidate</th><th align="left">Delta / 95% CI</th><th align="left">Duration</th><th align="left">Status</th></tr>{''.join(history_rows) or '<tr><td colspan="8">No retraining runs found.</td></tr>'}</table>
+{model_html}
+<p style="color:#667085;font-size:13px">Last model update: {number(_format_run_time(summary['retraining']['last_run_at']))}<br>
+New version last put in use: {number(_format_run_time(summary['retraining']['last_promoted_at']))}</p>
+<h3 style="font-size:15px;color:#173f5f">Recent model updates</h3>
+<table style="width:100%;border-collapse:collapse"><tr><th align="left">Date</th><th align="left">Result</th><th align="left">Why</th><th align="left">Sorted correctly</th></tr>{''.join(update_rows) or '<tr><td colspan="4">No model updates yet.</td></tr>'}</table>
 <h3 style="font-size:15px;color:#173f5f">Email commands</h3>
 <p>Reply to this summary with one command on the first line.<br></p>
 <ul><li><b>UNDO [n]</b>: restore the mails of the last n processing batches (default 1, max 20) to INBOX.</li>
@@ -701,6 +637,11 @@ Last promoted model: {number(summary['retraining']['last_promoted_at'] or 'not a
 <li><b>RESTORE MODEL</b>: restore the replaced model if its one-week backup is available.</li>
 <li><b>LOGS &lt;1-2000&gt;</b>: append recent Cloud Run API logs as a text attachment.</li>
 <li><b>SUMMARY</b>: send an on-demand summary.</li></ul>
+<div style="color:#667085;font-size:12px;margin-top:28px;border-top:1px solid #e5e9ed">
+<h3 style="font-size:13px;color:#667085">Technical details (for troubleshooting)</h3>
+<ul>{technical_items or '<li>No retraining metrics available yet.</li>'}<li>Training duration: {number(training_duration_text)}</li></ul>
+<table style="width:100%;border-collapse:collapse"><tr><th align="left">Run</th><th align="left">Holdout</th><th align="left">Accuracy</th><th align="left">Recall</th><th align="left">F1 baseline -> candidate</th><th align="left">Delta / 95% CI</th><th align="left">Duration</th><th align="left">Status</th></tr>{''.join(history_rows) or '<tr><td colspan="8">No retraining runs found.</td></tr>'}</table>
+</div>
 </div></div>
 <style>h2{{font-size:18px;margin:22px 0 10px;color:#173f5f}}td,th{{padding:8px 6px;border-bottom:1px solid #e5e9ed;font-size:14px}}</style>
 </body></html>"""
