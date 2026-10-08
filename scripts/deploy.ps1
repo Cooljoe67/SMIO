@@ -103,6 +103,88 @@ function Invoke-Gcloud {
     }
 }
 
+function Test-GcloudSecret {
+    param([string]$Name)
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & gcloud secrets describe $Name "--project=$ProjectId" "--format=value(name)" 2>&1 | Out-Null
+        return ($LASTEXITCODE -eq 0)
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+}
+
+function New-GcloudSecret {
+    param([string]$Name, [string]$Value)
+
+    # Read from a file: piping the value to gcloud would add a newline to the secret.
+    $valueFile = [System.IO.Path]::GetTempFileName()
+    try {
+        [System.IO.File]::WriteAllText($valueFile, $Value)
+        Invoke-Gcloud @(
+            "secrets", "create", $Name,
+            "--replication-policy=automatic",
+            "--data-file=$valueFile",
+            "--project=$ProjectId"
+        ) | Out-Null
+    }
+    finally {
+        Remove-Item -LiteralPath $valueFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Read-HiddenValue {
+    param([string]$Prompt)
+
+    $secureValue = Read-Host -Prompt $Prompt -AsSecureString
+    $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureValue)
+    try {
+        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)
+    }
+    finally {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
+    }
+}
+
+function Confirm-Secret {
+    # Creates a missing Secret Manager secret from a prompt; returns whether it exists.
+    param(
+        [string]$Name,
+        [string]$Prompt,
+        [string]$Default = "",
+        [switch]$Hidden,
+        [switch]$Optional
+    )
+
+    if (Test-GcloudSecret $Name) {
+        return $true
+    }
+    Write-Host "Secret '$Name' does not exist in project $ProjectId yet."
+    if ($Hidden) {
+        $value = Read-HiddenValue $Prompt
+    }
+    else {
+        $suffix = if ($Default) { " [$Default]" } else { "" }
+        $value = Read-Host -Prompt "$Prompt$suffix"
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            $value = $Default
+        }
+    }
+    if ([string]::IsNullOrEmpty($value)) {
+        if ($Optional) {
+            Write-Host "Skipped secret '$Name'."
+            return $false
+        }
+        throw "A value for secret '$Name' is required."
+    }
+    New-GcloudSecret $Name $value
+    Write-Host "Created secret '$Name'."
+    return $true
+}
+
 function Pause-SchedulerJob {
     param(
         [string]$JobName,
@@ -271,6 +353,12 @@ Write-Host "GCS bucket: $GcsBucket"
 
 Invoke-Gcloud @("services", "enable", "artifactregistry.googleapis.com", "run.googleapis.com", "secretmanager.googleapis.com")
 
+# Credentials are kept only in Secret Manager; ask once for any that are missing.
+Confirm-Secret $ImapHostSecret "IMAP host" -Default (Resolve-ConfigValue "" "IMAP_HOST" $DotEnvValues) | Out-Null
+Confirm-Secret $ImapUserSecret "IMAP user" -Default (Resolve-ConfigValue "" "IMAP_USER" $DotEnvValues) | Out-Null
+Confirm-Secret $ImapPasswordSecret "IMAP password" -Hidden | Out-Null
+$anthropicSecretExists = Confirm-Secret $AnthropicApiKeySecret "Anthropic API key (Enter to skip)" -Hidden -Optional
+
 $repositoryCheckErrorAction = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 $repositoryOutput = & gcloud artifacts repositories describe $Repository "--location=$Region" "--project=$ProjectId" 2>&1
@@ -340,19 +428,10 @@ $secretBindings = @(
     "IMAP_PASSWORD=$ImapPasswordSecret`:latest"
 )
 # Optional: without it, reply-based status updates wait for a key.
-$previousErrorActionPreference = $ErrorActionPreference
-try {
-    $ErrorActionPreference = "Continue"
-    & gcloud secrets describe $AnthropicApiKeySecret "--project=$ProjectId" "--format=value(name)" 2>&1 | Out-Null
-    $anthropicSecretExitCode = $LASTEXITCODE
-}
-finally {
-    $ErrorActionPreference = $previousErrorActionPreference
-}
-if ($anthropicSecretExitCode -eq 0) {
+if ($anthropicSecretExists) {
     $secretBindings += "ANTHROPIC_API_KEY=$AnthropicApiKeySecret`:latest"
 } else {
-    Write-Host "Secret '$AnthropicApiKeySecret' not found; deploying without ANTHROPIC_API_KEY."
+    Write-Host "Deploying without ANTHROPIC_API_KEY."
 }
 
 Write-Host "Deploying Cloud Run service..."

@@ -179,8 +179,10 @@ gcloud run deploy smio \
   --set-env-vars=GCS_BUCKET="$GCS_BUCKET",GCS_CLASSIFIER_MODEL_PREFIX=models/distilbert_deployed,GCS_DATABASE_OBJECT=databases/smio.db
 ```
 
-Set IMAP and SMTP values with Secret Manager rather than command-line environment
-variables. Give the Cloud Run service account read/write access to the GCS bucket.
+Set the IMAP values (and optionally `ANTHROPIC_API_KEY`) with Secret Manager rather
+than command-line environment variables or `.env`. `scripts/deploy.ps1` asks for any of
+the secrets `imap-host`, `imap-user`, `imap-password` and `anthropic-api-key` that do
+not exist yet (passwords and keys hidden) and creates them. Give the Cloud Run service account read/write access to the GCS bucket.
 Create a dedicated scheduler service account, grant it `roles/run.invoker` on the
 `smio` service, then create the schedules with an OIDC token:
 
