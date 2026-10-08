@@ -35,7 +35,6 @@ from src.ai.promotion_rules import (
     PROMOTION_MAX_CLASS_RECALL_DROP,
     PROMOTION_MIN_CLASS_SUPPORT,
 )
-from src.config import get_config
 from src.ai.retraining_explainer import (
     explain_retraining,
     explanation_html,
@@ -197,13 +196,8 @@ def _append_log(entry):
 
 
 def _model_emails(db):
-    """Mails of the accounts whose folder list uses the model retrained here."""
-    account_ids = [
-        account.id
-        for account in get_config().accounts
-        if account.folder_list == classifier.DEFAULT_FOLDER_LIST
-    ]
-    return db.query(Email).filter(Email.account.in_(account_ids))
+    """Mails labelled for the folder list whose model is retrained here."""
+    return db.query(Email).filter(Email.folder_list == classifier.DEFAULT_FOLDER_LIST)
 
 
 def _pending_corrections(db):

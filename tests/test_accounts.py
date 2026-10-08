@@ -128,6 +128,7 @@ def test_folder_move_is_a_correction_in_that_accounts_folder_layout(db, accounts
 
     assert email.true_label == "delivery"
     assert email.classification_source == "imap_folder"
+    assert email.folder_list == "small"
 
 
 def test_undo_only_restores_the_accounts_own_batches(db, accounts, mailboxes):
@@ -232,20 +233,24 @@ def test_retrain_is_refused_for_other_folder_lists(db, accounts):
     assert command_processor._command_failed(result)
 
 
-def test_existing_mails_are_assigned_to_the_primary_account(tmp_path, monkeypatch, accounts):
+def test_existing_mails_get_the_primary_account_and_original_folder_list(tmp_path, monkeypatch, accounts):
     engine = create_engine(f"sqlite:///{(tmp_path / 'old.db').as_posix()}")
     with engine.begin() as connection:
         connection.execute(text(
             "CREATE TABLE emails (id INTEGER PRIMARY KEY, processed INTEGER, "
-            "true_label TEXT, uid TEXT)"
+            "classification TEXT, true_label TEXT, uid TEXT)"
         ))
-        connection.execute(text("INSERT INTO emails (id, processed) VALUES (1, 1)"))
+        connection.execute(text(
+            "INSERT INTO emails (id, processed, classification) VALUES (1, 1, 'tech'), (2, 0, NULL)"
+        ))
     monkeypatch.setattr(database, "engine", engine)
     monkeypatch.setattr(database, "persist_database", lambda: False)
 
     database.ensure_email_columns()
 
     with engine.connect() as connection:
-        assert connection.execute(text("SELECT account FROM emails")).scalar() == "first"
+        rows = connection.execute(text("SELECT account, folder_list FROM emails ORDER BY id")).all()
+    # Only labelled mails get the original folder list; unclassified ones get theirs later.
+    assert rows == [("first", "default"), ("first", None)]
     assert "ix_emails_account" in {index["name"] for index in inspect(engine).get_indexes("emails")}
     engine.dispose()

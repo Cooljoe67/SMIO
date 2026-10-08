@@ -234,6 +234,7 @@ def _sync_message(db, account, msg, folder_name, allow_new):
     ):
         email_obj.true_label = folder_classification
         email_obj.classification_source = "imap_folder"
+        email_obj.folder_list = account.folder_list
     elif (
         not new_email
         and folder_name == inbox_folder(account)
@@ -243,10 +244,12 @@ def _sync_message(db, account, msg, folder_name, allow_new):
         email_obj.classification = "other"
         email_obj.true_label = "other"
         email_obj.classification_source = "imap_folder"
+        email_obj.folder_list = account.folder_list
 
     if folder_classification and email_obj.classification != folder_classification:
         email_obj.classification = folder_classification
         email_obj.classification_source = "imap_folder"
+        email_obj.folder_list = account.folder_list
     if new_email:
         db.add(email_obj)
     return email_obj

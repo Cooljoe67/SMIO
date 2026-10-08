@@ -45,6 +45,7 @@ def process_email_by_id(email_id: int, db: Session, account, batch_id: int = Non
         if _is_smio_mail(email.sender, account):
             email.classification = "other"
             email.classification_source = "system"
+            email.folder_list = account.folder_list
             email.confidence = None
             email.processed = int(email.processed or 0) + 1
             email.processing_batch = batch_id
@@ -85,6 +86,7 @@ def process_email_by_id(email_id: int, db: Session, account, batch_id: int = Non
         )
         email.classification = classification
         email.classification_source = "model"
+        email.folder_list = account.folder_list
         email.confidence = str(confidence)
 
         result = {

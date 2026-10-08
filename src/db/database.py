@@ -63,6 +63,7 @@ def persist_database():
 def ensure_email_columns():
     required_columns = {
         "account": "TEXT",
+        "folder_list": "TEXT",
         "order_id": "TEXT",
         "tracking_id": "TEXT",
         "entity_date": "TEXT",
@@ -125,7 +126,12 @@ def ensure_email_columns():
             text("UPDATE emails SET account = :account WHERE account IS NULL"),
             {"account": primary_account().id},
         )
-        for column_name in ("account", "case_ref", "dataset_key"):
+        # Labels from before folder lists existed refer to the original list.
+        connection.execute(text(
+            "UPDATE emails SET folder_list = 'default' WHERE folder_list IS NULL "
+            "AND (classification IS NOT NULL OR true_label IS NOT NULL)"
+        ))
+        for column_name in ("account", "folder_list", "case_ref", "dataset_key"):
             connection.execute(text(
                 f"CREATE INDEX IF NOT EXISTS ix_emails_{column_name} ON emails ({column_name})"
             ))

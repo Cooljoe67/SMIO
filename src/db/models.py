@@ -40,6 +40,8 @@ class Email(Base):
 
 
     # AI fields
+    # Folder list (config/smio.yaml) that classification and true_label refer to.
+    folder_list = Column(String, nullable=True, index=True)
     classification = Column(String, nullable=True)
     classification_source = Column(String, nullable=True)
     confidence = Column(String, nullable=True)
