@@ -181,7 +181,7 @@ gcloud run deploy smio \
 
 Set the IMAP values (and optionally `ANTHROPIC_API_KEY`) with Secret Manager rather
 than command-line environment variables or `.env`. `scripts/deploy.ps1` asks for any of
-the secrets `imap-host`, `imap-user`, `imap-password` and `anthropic-api-key` that do
+the secrets `imap-host`, `imap-user`, `imap-password` and `claude-api-key` that do
 not exist yet (passwords and keys hidden) and creates them. Give the Cloud Run service account read/write access to the GCS bucket.
 Create a dedicated scheduler service account, grant it `roles/run.invoker` on the
 `smio` service, then create the schedules with an OIDC token:

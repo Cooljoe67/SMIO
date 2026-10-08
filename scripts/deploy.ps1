@@ -20,7 +20,7 @@ param(
     [string]$ImapHostSecret = "imap-host",
     [string]$ImapUserSecret = "imap-user",
     [string]$ImapPasswordSecret = "imap-password",
-    [string]$AnthropicApiKeySecret = "anthropic-api-key",
+    [string]$AnthropicApiKeySecret = "claude-api-key",
     [switch]$UpdateNerModel,
     [string]$NerModelDirectory = ".\models\ner-smio"
 )
