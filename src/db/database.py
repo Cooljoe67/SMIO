@@ -64,6 +64,8 @@ def ensure_email_columns():
     required_columns = {
         "account": "TEXT",
         "folder_list": "TEXT",
+        "provider_message_id": "TEXT",
+        "fingerprint": "TEXT",
         "order_id": "TEXT",
         "tracking_id": "TEXT",
         "entity_date": "TEXT",
@@ -135,7 +137,10 @@ def ensure_email_columns():
             "UPDATE emails SET folder_list = 'default' WHERE folder_list IS NULL "
             "AND (classification IS NOT NULL OR true_label IS NOT NULL)"
         ))
-        for column_name in ("account", "folder_list", "case_ref", "dataset_key"):
+        for column_name in (
+            "account", "folder_list", "case_ref", "dataset_key",
+            "provider_message_id", "fingerprint",
+        ):
             connection.execute(text(
                 f"CREATE INDEX IF NOT EXISTS ix_emails_{column_name} ON emails ({column_name})"
             ))
@@ -173,6 +178,26 @@ def ensure_email_columns():
         for column_name in obsolete_columns & existing_columns:
             connection.execute(text(f"ALTER TABLE emails DROP COLUMN {column_name}"))
     persist_database()
+
+
+def backfill_fingerprints():
+    """Give stored mailbox mails their fingerprint; safe to repeat."""
+    from src.api.utils.mail_identity import email_fingerprint
+    from src.db.models import Email
+
+    db = SessionLocal()
+    try:
+        emails = db.query(Email).filter(
+            Email.fingerprint.is_(None),
+            Email.account.isnot(None),
+        ).all()
+        for email in emails:
+            email.fingerprint = email_fingerprint(email)
+        if emails:
+            db.commit()
+        return len(emails)
+    finally:
+        db.close()
 
 
 def ensure_summary_snapshot_columns():

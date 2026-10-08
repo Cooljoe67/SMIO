@@ -4,7 +4,7 @@ import logging
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
 from email.mime.text import MIMEText
-from email.utils import formataddr
+from email.utils import formataddr, formatdate, make_msgid
 
 from src.config import primary_account
 
@@ -50,6 +50,9 @@ def append_summary_to_inbox(
     message["From"] = formataddr(("Smio, der Mail Organizer", account.email))
     message["To"] = account.email
     message["Reply-To"] = account.email
+    # Without these the mail could only be recognised by its UID.
+    message["Message-ID"] = make_msgid(domain=account.email.rpartition("@")[2] or None)
+    message["Date"] = formatdate(localtime=True)
 
     try:
         with open_mailbox(account) as mailbox:

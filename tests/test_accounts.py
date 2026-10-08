@@ -70,6 +70,8 @@ def mailboxes(monkeypatch):
 
     for module in (imap_client, inbox_processor):
         monkeypatch.setattr(module, "open_mailbox", open_mailbox)
+    # UID verification has its own tests in test_mail_identity.py.
+    monkeypatch.setattr(imap_client, "_verify_uid", lambda mailbox, email, folder: object())
     return opened
 
 

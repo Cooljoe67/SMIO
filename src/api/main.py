@@ -5,6 +5,7 @@ from .middleware import publish_database_changes
 from .routers import imap, inbox, jobs, summary
 
 from src.db.database import (
+    backfill_fingerprints,
     backfill_retrain_runs,
     engine,
     ensure_email_columns,
@@ -19,6 +20,7 @@ Base.metadata.create_all(bind=engine)
 ensure_email_columns()
 ensure_summary_snapshot_columns()
 backfill_retrain_runs()
+backfill_fingerprints()
 persist_database()
 
 

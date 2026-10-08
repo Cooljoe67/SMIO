@@ -260,9 +260,9 @@ def undo_processing_batches(db: Session, account, count: int = 1):
         for email in emails:
             try:
                 new_uid = move_email_to_inbox(mailbox, email, account)
-                if new_uid:
-                    email.uid = new_uid
-                else:
+                # The old UID belonged to the source folder; never keep it.
+                email.uid = new_uid
+                if not new_uid:
                     logger.warning(
                         "Email %s: INBOX UID unknown after undo; next sync will resolve it",
                         email.id,

@@ -59,6 +59,8 @@ class FakeMailBox:
 def mailbox(monkeypatch):
     fake = FakeMailBox()
     monkeypatch.setattr(imap_client, "MailBox", lambda host: fake)
+    # UID verification has its own tests in test_mail_identity.py.
+    monkeypatch.setattr(imap_client, "_verify_uid", lambda mailbox, email, folder: object())
     return fake
 
 
