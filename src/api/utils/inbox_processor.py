@@ -152,6 +152,7 @@ def process_unprocessed_emails(db: Session, account):
         for (email_id,) in db.query(Email.id)
         .filter(
             Email.account == account.id,
+            Email.is_training_data.is_(False),
             or_(Email.processed <= 0, Email.processed.is_(None)),
         )
         .all()

@@ -121,9 +121,13 @@ def ensure_email_columns():
                 connection.execute(
                     text(f"ALTER TABLE emails ADD COLUMN {column_name} {column_type}")
                 )
-        # Mails from before multi-account support belong to the primary account.
+        # Mails from before multi-account support belong to the primary account;
+        # imported labelled data belongs to no mailbox.
         connection.execute(
-            text("UPDATE emails SET account = :account WHERE account IS NULL"),
+            text(
+                "UPDATE emails SET account = :account "
+                "WHERE account IS NULL AND COALESCE(is_training_data, 0) = 0"
+            ),
             {"account": primary_account().id},
         )
         # Labels from before folder lists existed refer to the original list.
