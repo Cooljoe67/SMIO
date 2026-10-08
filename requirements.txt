@@ -16,6 +16,7 @@ fastapi
 uvicorn[standard]
 pydantic-settings
 pyyaml
+anthropic
 
 # Email handling
 imap-tools

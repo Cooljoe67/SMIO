@@ -95,6 +95,14 @@ def ensure_email_columns():
         "is_own_domain_sender": "BOOLEAN",
         "is_reply": "BOOLEAN",
         "is_forward": "BOOLEAN",
+        "in_reply_to": "TEXT",
+        "reference_ids": "TEXT",
+        "reply_to_id": "INTEGER",
+        "reply_checked_at": "DATETIME",
+        "status_source": "TEXT",
+        "status_reason": "TEXT",
+        "status_suggestion": "TEXT",
+        "status_updated_at": "DATETIME",
         "status": "TEXT",
         "priority": "TEXT",
         "action": "TEXT",
@@ -139,7 +147,7 @@ def ensure_email_columns():
         ))
         for column_name in (
             "account", "folder_list", "case_ref", "dataset_key",
-            "provider_message_id", "fingerprint",
+            "provider_message_id", "fingerprint", "in_reply_to", "reply_to_id",
         ):
             connection.execute(text(
                 f"CREATE INDEX IF NOT EXISTS ix_emails_{column_name} ON emails ({column_name})"

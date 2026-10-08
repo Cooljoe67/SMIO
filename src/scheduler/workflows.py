@@ -15,6 +15,7 @@ from src.api.utils.command_processor import process_instruction_mails
 from src.api.utils.imap_client import fetch_inbox
 from src.api.utils.inbox_processor import process_unprocessed_emails
 from src.api.utils.mailer import append_summary_to_inbox
+from src.api.utils.reply_tracking import update_statuses_from_replies
 from src.config import get_config, reload_config
 from src.db.database import SessionLocal, persist_database
 from src.db.models import SummarySnapshot
@@ -53,6 +54,7 @@ def _process_account(account, is_primary):
     db = SessionLocal()
     try:
         batch_id, results, errors = process_unprocessed_emails(db, account)
+        status_result = update_statuses_from_replies(db, account)
     finally:
         db.close()
 
@@ -65,6 +67,7 @@ def _process_account(account, is_primary):
         "moved": sum("folder" in result for result in results),
         "failed": len(errors),
         "errors": errors,
+        "reply_status": status_result,
     }
 
 

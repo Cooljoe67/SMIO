@@ -1,5 +1,7 @@
 import logging
-from datetime import datetime, timedelta, timezone
+import os
+import re
+from datetime import date, datetime, timedelta, timezone
 
 from imap_tools import AND, H, MailBox
 from src.db.database import SessionLocal
@@ -17,6 +19,9 @@ from .folder_rules import (
 
 logger = logging.getLogger(__name__)
 
+# Sent mails are only needed to recognise replies, so only recent ones are read.
+SENT_SYNC_DAYS = int(os.getenv("SMIO_SENT_SYNC_DAYS", "30"))
+
 
 def open_mailbox(account):
     """Log in to an account's mailbox; use as a context manager."""
@@ -27,12 +32,30 @@ def open_mailbox(account):
     return MailBox(account.imap.host).login(account.imap.username, account.imap.password)
 
 
-def _message_id(message):
+def _header(message, name):
     headers = getattr(message, "headers", {}) or {}
-    value = headers.get("Message-ID") or headers.get("Message-Id") or ""
+    value = headers.get(name) or ""
     if isinstance(value, (list, tuple)):
         value = value[0] if value else ""
     return str(value).strip()
+
+
+def _message_id(message):
+    return _header(message, "Message-ID") or _header(message, "Message-Id")
+
+
+def _message_ids(value):
+    return re.findall(r"<[^<>\s]+>", value or "")
+
+
+def _sent_folder(mailbox, account):
+    """The account's sent folder: configured, else the one flagged \\Sent."""
+    if account.mailbox.sent:
+        return account.mailbox.sent
+    for folder in mailbox.folder.list():
+        if "\\Sent" in (getattr(folder, "flags", ()) or ()):
+            return folder.name
+    return None
 
 
 def _is_seen(message):
@@ -229,7 +252,9 @@ def cleanup_expired_mails(db, mailbox, account):
     }
 
 
-def _sync_message(db, account, msg, folder_name, allow_new, seen_ids=(), new_emails=None):
+def _sync_message(
+    db, account, msg, folder_name, allow_new, seen_ids=(), new_emails=None, outbound=False
+):
     message_id, mail_fingerprint = _identity(account, msg)
     email_obj = _find_email(db, account, message_id, mail_fingerprint, msg.subject, msg.date)
     if email_obj is not None and email_obj.id in seen_ids:
@@ -240,8 +265,16 @@ def _sync_message(db, account, msg, folder_name, allow_new, seen_ids=(), new_ema
         return None
     if new_email:
         email_obj = Email(account=account.id)
+        if outbound:
+            # Sent by the account: never classified, moved or counted as received.
+            email_obj.direction = "OUTBOUND"
+            email_obj.processed = 1
+            email_obj.processing_batch = 0
     email_obj.message_id = message_id
     email_obj.fingerprint = mail_fingerprint
+    in_reply_to = _message_ids(_header(msg, "In-Reply-To"))
+    email_obj.in_reply_to = in_reply_to[0] if in_reply_to else None
+    email_obj.reference_ids = " ".join(_message_ids(_header(msg, "References"))) or None
 
     sync_timestamp = datetime.now(timezone.utc).replace(tzinfo=None)
     email_obj.last_seen_at = sync_timestamp
@@ -296,6 +329,28 @@ def _sync_message(db, account, msg, folder_name, allow_new, seen_ids=(), new_ema
     return email_obj
 
 
+def _sync_sent(db, mailbox, account, allow_new, seen_ids):
+    """Store recent sent mails so replies can update the status of what they answer.
+
+    Scanned after the inbox, so a mail sent to oneself keeps its inbox copy. Not
+    part of the stale check: older sent mails are simply not read.
+    """
+    sent = _sent_folder(mailbox, account)
+    if not sent or not mailbox.folder.exists(sent):
+        return {"folder": None, "new": 0}
+    mailbox.folder.set(sent, readonly=True)
+    since = date.today() - timedelta(days=SENT_SYNC_DAYS)
+    new_sent = []
+    for msg in mailbox.fetch(AND(date_gte=since), mark_seen=False):
+        email_obj = _sync_message(
+            db, account, msg, sent, allow_new=allow_new,
+            seen_ids=seen_ids, new_emails=new_sent, outbound=True,
+        )
+        if email_obj is not None:
+            seen_ids.add(email_obj.id)
+    return {"folder": sent, "new": len(new_sent)}
+
+
 def _sync_folders(account, allow_new):
     """Reconcile the inbox and classification folders; new mails only from the inbox.
 
@@ -333,6 +388,7 @@ def _sync_folders(account, allow_new):
                     seen_ids.add(email_obj.id)
                     if len(new_emails) == new_count:
                         changed += 1
+            sent_result = _sync_sent(db, mailbox, account, allow_new, seen_ids)
             stale_emails = db.query(Email).filter(
                 Email.account == account.id,
                 Email.folder.in_(active_folders),
@@ -345,7 +401,13 @@ def _sync_folders(account, allow_new):
             db.commit()
             cleanup = cleanup_expired_mails(db, mailbox, account)
             db.commit()
-            return {"checked": checked, "changed": changed, "cleanup": cleanup, "new": new_emails}
+            return {
+                "checked": checked,
+                "changed": changed,
+                "sent": sent_result,
+                "cleanup": cleanup,
+                "new": new_emails,
+            }
         except Exception:
             db.rollback()
             raise

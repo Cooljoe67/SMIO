@@ -37,6 +37,12 @@ class Email(Base):
     is_own_domain_sender = Column(Boolean, nullable=True)
     is_reply = Column(Boolean, nullable=True)
     is_forward = Column(Boolean, nullable=True)
+    # Message-IDs this mail answers (In-Reply-To, References), to follow threads.
+    in_reply_to = Column(String, nullable=True, index=True)
+    reference_ids = Column(Text, nullable=True)
+    # Mail whose status this reply was checked against, and when.
+    reply_to_id = Column(Integer, nullable=True, index=True)
+    reply_checked_at = Column(DateTime, nullable=True)
     date = Column(DateTime, default=_utcnow)
     read_at = Column(DateTime, nullable=True, index=True)
 
@@ -59,6 +65,12 @@ class Email(Base):
     mail_type_1 = Column(String, nullable=True)
     mail_type_2 = Column(String, nullable=True)
     classification_reason = Column(Text, nullable=True)
+    # Where the status came from (model, reply, command, dataset) and why;
+    # a reply below the confidence threshold only leaves a suggestion.
+    status_source = Column(String, nullable=True)
+    status_reason = Column(Text, nullable=True)
+    status_suggestion = Column(String, nullable=True)
+    status_updated_at = Column(DateTime, nullable=True)
     # Business case the mail belongs to, e.g. a shipment or order reference.
     case_ref = Column(String, nullable=True, index=True)
 

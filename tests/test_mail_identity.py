@@ -14,13 +14,18 @@ from src.db.models import Base, Email
 SENT = datetime(2026, 10, 7, 9, 30, tzinfo=timezone(timedelta(hours=2)))
 
 
-def _message(uid, message_id="<a@test>", subject="Lieferung", date=SENT, text="Hallo", seen=False):
+def _message(
+    uid, message_id="<a@test>", subject="Lieferung", date=SENT, text="Hallo", seen=False,
+    sender="Sender <sender@test>", **headers
+):
+    if message_id:
+        headers["Message-ID"] = message_id
     return SimpleNamespace(
         uid=uid,
-        headers={"Message-ID": message_id} if message_id else {},
+        headers=headers,
         flags=("\\Seen",) if seen else (),
         subject=subject,
-        from_="Sender <sender@test>",
+        from_=sender,
         date=date,
         text=text,
         html="",
@@ -30,13 +35,18 @@ def _message(uid, message_id="<a@test>", subject="Lieferung", date=SENT, text="H
 class FakeServer:
     """Folders of messages; a move gives the message a new UID, like IMAP."""
 
-    def __init__(self, **folders):
+    def __init__(self, flags=None, **folders):
         self.folders = {name: list(messages) for name, messages in folders.items()}
+        self.flags = flags or {}
         self.current = "INBOX"
         self.next_uid = 500
         self.moves = []
+        self.criteria = {}
         self.folder = SimpleNamespace(
-            list=lambda: [SimpleNamespace(name=name) for name in self.folders],
+            list=lambda: [
+                SimpleNamespace(name=name, flags=self.flags.get(name, ()))
+                for name in self.folders
+            ],
             set=self._select,
             exists=lambda name: name in self.folders,
             create=lambda name: self.folders.setdefault(name, []),
@@ -51,7 +61,8 @@ class FakeServer:
     def _select(self, name, readonly=False):
         self.current = name
 
-    def fetch(self, mark_seen=False, uid_list=None, headers_only=False):
+    def fetch(self, criteria="ALL", mark_seen=False, uid_list=None, headers_only=False):
+        self.criteria[self.current] = str(criteria)
         messages = self.folders.get(self.current, [])
         return iter([m for m in messages if uid_list is None or m.uid in uid_list])
 
@@ -75,8 +86,8 @@ class FakeServer:
 def server(monkeypatch, db):
     holder = {}
 
-    def use(**folders):
-        holder["server"] = FakeServer(**folders)
+    def use(flags=None, **folders):
+        holder["server"] = FakeServer(flags, **folders)
         return holder["server"]
 
     monkeypatch.setattr(imap_client, "open_mailbox", lambda account: holder["server"])

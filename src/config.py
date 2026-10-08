@@ -45,6 +45,8 @@ class MailboxLayout(_Strict):
     inbox: str = "INBOX"
     folder_root: str = "INBOX"
     trash: str = "Papierkorb"
+    # Read-only, for recognising replies; None: the folder flagged \Sent.
+    sent: Optional[str] = None
 
 
 class ImapConnection(_Strict):
