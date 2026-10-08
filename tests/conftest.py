@@ -28,6 +28,7 @@ def _stub(name, **attrs):
 _stub(
     "src.ai.classifier",
     DEFAULT_FOLDER_LIST="default",
+    model_location=lambda folder_list: (Path(f"models/classifier-{folder_list}"), f"models/classifier-{folder_list}"),
     predict_text=lambda text, folder_list="default": ("other", 0.5),
     model_available=lambda folder_list: True,
     reload_model=lambda folder_list="default": None,

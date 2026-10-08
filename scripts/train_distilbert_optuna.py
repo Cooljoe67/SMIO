@@ -1,46 +1,65 @@
-import os
-import numpy as np
-import torch
-import optuna
+"""Tune and train the DistilBERT classifier of one folder list with Optuna.
+
+Each trial is scored by stratified group k-fold cross-validation: mails of the
+same business case (case_ref) always stay in one fold, so the score is not
+inflated by near-identical mails. The best trial's out-of-fold predictions give
+the confusion matrix; the final model is trained on all labelled mails and saved
+with its label names to the folder list's model location.
+
+The cross-validated score of the best trial is slightly optimistic, because the
+same folds were used to choose the learning rate.
+
+Usage:
+    python -m scripts.train_distilbert_optuna --folder-list rhein-cargo [--publish]
+"""
+
+import argparse
 import csv
+import os
+import shutil
+from collections import Counter
 
-from sklearn.model_selection import train_test_split
-from sklearn.utils.class_weight import compute_class_weight
+import numpy as np
+import optuna
+import torch
 from sklearn.metrics import (
-    precision_recall_fscore_support,
     accuracy_score,
+    classification_report,
     confusion_matrix,
+    precision_recall_fscore_support,
 )
-
+from sklearn.model_selection import StratifiedGroupKFold
+from sklearn.utils.class_weight import compute_class_weight
+from torch.utils.data import Dataset
 from transformers import (
-    DistilBertTokenizerFast,
     DistilBertForSequenceClassification,
-    TrainingArguments,
-    Trainer,
+    DistilBertTokenizerFast,
     EarlyStoppingCallback,
+    Trainer,
+    TrainingArguments,
 )
 from transformers.modeling_outputs import SequenceClassifierOutput
 
-from torch.utils.data import Dataset
+from src.ai.classifier import DEFAULT_FOLDER_LIST, model_location
+from src.ai.labels import LABEL2ID as DEFAULT_LABEL2ID
+from src.config import get_config
 from src.db.database import SessionLocal
 from src.db.models import Email
-from src.ai.labels import LABEL2ID, ID2LABEL
+from src.storage import gcs
 
 
-MODEL_NAME = "distilbert-base-uncased"
+BASE_MODEL = "distilbert-base-uncased"
 BASE_OUTPUT_DIR = "./models/distilbert_optuna"
-DEPLOY_DIR = "./models/distilbert_deployed"
-
-# Fixed training configuration for this study.
-STUDY_NAME = "distilbert_email_classification_fixed_256"
 STUDY_STORAGE = "sqlite:///optuna_distilbert.db"   # persistent Optuna DB
-NUM_SPLITS = 1
+
+NUM_FOLDS = 5
 NUM_TRAIN_EPOCHS = 4
 MAX_LENGTH = 256
 BATCH_SIZE = 16
 WARMUP_RATIO = 0.15
 N_TRIALS = 5
 TARGET_F1 = 0.89
+RANDOM_STATE = 42
 
 
 # ---------- Dataset ----------
@@ -107,257 +126,309 @@ class WeightedDistilBertForSequenceClassification(DistilBertForSequenceClassific
 
 # ---------- Data Loading ----------
 
-def load_data():
-    db = SessionLocal()
-    try:
-        emails = db.query(Email).filter(Email.true_label != None).all()
-        texts, labels = [], []
+def label_ids(folder_list):
+    """Label -> id. The default list keeps the ids the retraining code expects."""
+    if folder_list == DEFAULT_FOLDER_LIST:
+        return dict(DEFAULT_LABEL2ID)
+    labels = sorted(get_config().folder_lists[folder_list]) + ["other"]
+    return {label: index for index, label in enumerate(labels)}
 
-        for email in emails:
-            if email.true_label in LABEL2ID:
-                texts.append(email.text)
-                labels.append(LABEL2ID[email.true_label])
 
-        return texts, labels
-    finally:
-        db.close()
+def load_data(db, folder_list, label2id):
+    """Texts, label ids and case groups of all mails labelled for the folder list."""
+    emails = db.query(Email).filter(
+        Email.folder_list == folder_list,
+        Email.true_label.isnot(None),
+    ).order_by(Email.id).all()
+    unknown = Counter(email.true_label for email in emails if email.true_label not in label2id)
+    if unknown:
+        raise ValueError(f"Labels not in folder list {folder_list!r}: {dict(unknown)}")
+
+    texts = [email.text or "" for email in emails]
+    labels = [label2id[email.true_label] for email in emails]
+    # Mails without a case are their own group.
+    groups = [email.case_ref or f"mail-{email.id}" for email in emails]
+    return texts, labels, groups
+
+
+def make_folds(labels, groups, num_folds):
+    smallest = min(Counter(labels).values())
+    if smallest < num_folds:
+        print(f"Warning: the rarest label has only {smallest} mails for {num_folds} folds.")
+    splitter = StratifiedGroupKFold(
+        n_splits=num_folds,
+        shuffle=True,
+        random_state=RANDOM_STATE,
+    )
+    return list(splitter.split(np.zeros(len(labels)), labels, groups))
 
 
 # ---------- Metrics ----------
 
+def scores(labels_true, labels_pred):
+    result = {"accuracy": accuracy_score(labels_true, labels_pred)}
+    for average in ("macro", "weighted"):
+        precision, recall, f1, _ = precision_recall_fscore_support(
+            labels_true, labels_pred, average=average, zero_division=0
+        )
+        result.update({
+            f"{average}_precision": precision,
+            f"{average}_recall": recall,
+            f"{average}_f1": f1,
+        })
+    return result
+
+
 def compute_metrics(eval_pred):
     logits, labels_eval = eval_pred
-    preds = np.argmax(logits, axis=-1)
-
-    precision, recall, f1, _ = precision_recall_fscore_support(
-        labels_eval, preds, average="weighted"
-    )
-    acc = accuracy_score(labels_eval, preds)
-
-    return {"accuracy": acc, "precision": precision, "recall": recall, "f1": f1}
+    return scores(labels_eval, np.argmax(logits, axis=-1))
 
 
-def confusion_matrix_per_class(labels_true, labels_pred):
-    return confusion_matrix(labels_true, labels_pred, labels=list(LABEL2ID.values()))
+# ---------- Training ----------
 
-
-# ---------- Optuna Objective ----------
-
-def objective(trial, texts, labels, tokenizer, class_weights):
-
-    num_labels = len(LABEL2ID)
-    learning_rate = trial.suggest_float("learning_rate", 2e-5, 4e-5, log=True)
-
-    train_idx, val_idx = train_test_split(
-        np.arange(len(texts)),
-        test_size=0.2,
-        stratify=labels,
-        random_state=42,
-    )
-    fold_f1_scores = []
-
-    for fold, (train_idx, val_idx) in enumerate([(train_idx, val_idx)]):
-
-        train_dataset = EmailDataset(
-            [texts[i] for i in train_idx],
-            [labels[i] for i in train_idx],
-            tokenizer,
-            max_length=MAX_LENGTH,
-        )
-
-        val_dataset = EmailDataset(
-            [texts[i] for i in val_idx],
-            [labels[i] for i in val_idx],
-            tokenizer,
-            max_length=MAX_LENGTH,
-        )
-
-        model = WeightedDistilBertForSequenceClassification.from_pretrained(
-            MODEL_NAME,
-            num_labels=num_labels,
-            class_weights=class_weights,
-        )
-
-        training_args = TrainingArguments(
-            output_dir=f"{BASE_OUTPUT_DIR}/trial_{trial.number}_fold_{fold}",
-            num_train_epochs=NUM_TRAIN_EPOCHS,
-            per_device_train_batch_size=BATCH_SIZE,
-            per_device_eval_batch_size=BATCH_SIZE,
-            learning_rate=learning_rate,
-            warmup_ratio=WARMUP_RATIO,
-            weight_decay=0.01,
-            logging_steps=20,
-            eval_strategy="epoch",
-            save_strategy="epoch",
-            load_best_model_at_end=True,
-            metric_for_best_model="eval_f1",
-            greater_is_better=True,
-            report_to="none",
-            dataloader_num_workers=4,
-            dataloader_pin_memory=False,
-        )
-
-        trainer = Trainer(
-            model=model,
-            args=training_args,
-            train_dataset=train_dataset,
-            eval_dataset=val_dataset,
-            compute_metrics=compute_metrics,
-            callbacks=[EarlyStoppingCallback(early_stopping_patience=1)],
-        )
-
-        trainer.train()
-        metrics = trainer.evaluate()
-
-        if "eval_f1" not in metrics:
-            raise optuna.TrialPruned("No eval_f1 score returned")
-
-        f1 = float(metrics["eval_f1"])
-        fold_f1_scores.append(f1)
-
-        # Zwischenergebnisse speichern
-        trial.set_user_attr(f"fold_{fold}_f1", f1)
-        trial.set_user_attr(f"fold_{fold}_eval_loss", float(metrics.get("eval_loss", 0.0)))
-
-    avg_f1 = float(np.mean(fold_f1_scores))
-    trial.set_user_attr("avg_f1", avg_f1)
-
-    # Stop the sequential study after reaching the target without discarding the trial.
-    if avg_f1 >= TARGET_F1:
-        trial.set_user_attr("target_reached", True)
-        trial.study.stop()
-
-    return avg_f1
-
-
-# ---------- Main ----------
-
-def main():
-    os.makedirs(BASE_OUTPUT_DIR, exist_ok=True)
-    os.makedirs(DEPLOY_DIR, exist_ok=True)
-
-    tokenizer = DistilBertTokenizerFast.from_pretrained(
-        MODEL_NAME,
-        clean_up_tokenization_spaces=True,
-    )
-    texts, labels = load_data()
-    labels_arr = np.array(labels)
-
-    class_weights = compute_class_weight(
-        class_weight="balanced",
-        classes=np.unique(labels_arr),
-        y=labels_arr,
-    )
-
-    # Persistente Optuna-Study
-    study = optuna.create_study(
-        direction="maximize",
-        study_name=STUDY_NAME,
-        storage=STUDY_STORAGE,
-        load_if_exists=True,
-    )
-
-    def wrapped_objective(trial):
-        return objective(trial, texts, labels_arr, tokenizer, class_weights)
-
-    study.optimize(
-        wrapped_objective,
-        n_trials=N_TRIALS,
-        gc_after_trial=True,
-    )
-
-    best_trial = study.best_trial
-    print("\n=== BEST TRIAL ===")
-    print("Value (F1):", best_trial.value)
-    print("Params:", best_trial.params)
-
-    # CSV Logging
-    csv_path = os.path.join(BASE_OUTPUT_DIR, "optuna_results.csv")
-    with open(csv_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["trial", "f1", "learning_rate", "batch_size", "max_length", "warmup_ratio"])
-        for t in study.trials:
-            writer.writerow([
-                t.number,
-                t.value,
-                t.params.get("learning_rate"),
-                BATCH_SIZE,
-                MAX_LENGTH,
-                WARMUP_RATIO,
-            ])
-
-    # Finales Training
-    num_labels = len(LABEL2ID)
-    best_lr = best_trial.params.get("learning_rate", 3e-5)
-    best_bs = BATCH_SIZE
-
-    final_dataset = EmailDataset(texts, labels, tokenizer, max_length=MAX_LENGTH)
-    final_model = WeightedDistilBertForSequenceClassification.from_pretrained(
-        MODEL_NAME,
-        num_labels=num_labels,
-        class_weights=class_weights,
-    )
-
-    final_args = TrainingArguments(
-        output_dir=f"{BASE_OUTPUT_DIR}/final",
-        num_train_epochs=NUM_TRAIN_EPOCHS,
-        per_device_train_batch_size=best_bs,
-        per_device_eval_batch_size=best_bs,
-        learning_rate=best_lr,
+def _training_args(output_dir, learning_rate, num_epochs, evaluate, metric):
+    return TrainingArguments(
+        output_dir=output_dir,
+        num_train_epochs=num_epochs,
+        per_device_train_batch_size=BATCH_SIZE,
+        per_device_eval_batch_size=BATCH_SIZE,
+        learning_rate=learning_rate,
         warmup_ratio=WARMUP_RATIO,
         weight_decay=0.01,
         logging_steps=20,
-        eval_strategy="epoch",
-        save_strategy="epoch",
+        eval_strategy="epoch" if evaluate else "no",
+        save_strategy="epoch" if evaluate else "no",
+        save_total_limit=1,
+        load_best_model_at_end=evaluate,
+        metric_for_best_model=f"eval_{metric}_f1" if evaluate else None,
+        greater_is_better=True,
         report_to="none",
         dataloader_num_workers=4,
         dataloader_pin_memory=False,
     )
 
+
+def _new_model(base_model, label2id, class_weights):
+    return WeightedDistilBertForSequenceClassification.from_pretrained(
+        base_model,
+        num_labels=len(label2id),
+        id2label={index: label for label, index in label2id.items()},
+        label2id=label2id,
+        class_weights=class_weights,
+    )
+
+
+def _best_epoch(trainer):
+    """Epoch of the checkpoint early stopping kept."""
+    best = trainer.state.best_model_checkpoint
+    for entry in trainer.state.log_history:
+        if "eval_loss" in entry and best and best.endswith(f"checkpoint-{entry['step']}"):
+            return int(round(entry["epoch"]))
+    return NUM_TRAIN_EPOCHS
+
+
+def objective(trial, data, tokenizer, class_weights, options):
+    texts, labels, folds, label2id = data
+    learning_rate = trial.suggest_float("learning_rate", 2e-5, 4e-5, log=True)
+
+    out_of_fold = np.full(len(labels), -1)
+    fold_scores = []
+    best_epochs = []
+    for fold, (train_idx, val_idx) in enumerate(folds):
+        output_dir = f"{BASE_OUTPUT_DIR}/{options.folder_list}/trial_{trial.number}_fold_{fold}"
+        trainer = Trainer(
+            model=_new_model(options.base_model, label2id, class_weights),
+            args=_training_args(output_dir, learning_rate, NUM_TRAIN_EPOCHS, True, options.metric),
+            train_dataset=EmailDataset(
+                [texts[i] for i in train_idx], [labels[i] for i in train_idx], tokenizer, MAX_LENGTH
+            ),
+            eval_dataset=EmailDataset(
+                [texts[i] for i in val_idx], [labels[i] for i in val_idx], tokenizer, MAX_LENGTH
+            ),
+            compute_metrics=compute_metrics,
+            callbacks=[EarlyStoppingCallback(early_stopping_patience=1)],
+        )
+        trainer.train()
+        predictions = np.argmax(trainer.predict(trainer.eval_dataset).predictions, axis=-1)
+        out_of_fold[val_idx] = predictions
+        best_epochs.append(_best_epoch(trainer))
+        shutil.rmtree(output_dir, ignore_errors=True)
+
+        fold_score = scores([labels[i] for i in val_idx], predictions)
+        fold_scores.append(fold_score[f"{options.metric}_f1"])
+        trial.set_user_attr(f"fold_{fold}_f1", fold_scores[-1])
+
+        # Let Optuna stop a clearly worse trial early.
+        trial.report(float(np.mean(fold_scores)), fold)
+        if trial.should_prune():
+            raise optuna.TrialPruned()
+
+    overall = scores(labels, out_of_fold)
+    trial.set_user_attr("mean_fold_f1", float(np.mean(fold_scores)))
+    trial.set_user_attr("std_fold_f1", float(np.std(fold_scores)))
+    trial.set_user_attr("out_of_fold_scores", {key: float(value) for key, value in overall.items()})
+    trial.set_user_attr("out_of_fold_predictions", out_of_fold.tolist())
+    trial.set_user_attr("best_epochs", best_epochs)
+
+    mean_f1 = float(np.mean(fold_scores))
+    # Stop the sequential study after reaching the target without discarding the trial.
+    if options.target_f1 is not None and mean_f1 >= options.target_f1:
+        trial.set_user_attr("target_reached", True)
+        trial.study.stop()
+    return mean_f1
+
+
+# ---------- Reporting ----------
+
+def report(best_trial, labels, label2id, folder_list):
+    names = sorted(label2id, key=label2id.get)
+    predictions = best_trial.user_attrs["out_of_fold_predictions"]
+    print("\n=== BEST TRIAL ===")
+    print("Mean fold F1:", best_trial.value, "+/-", best_trial.user_attrs["std_fold_f1"])
+    print("Out-of-fold scores:", best_trial.user_attrs["out_of_fold_scores"])
+    print("Params:", best_trial.params, "best epochs:", best_trial.user_attrs["best_epochs"])
+    print("\nOut-of-fold classification report:")
+    print(classification_report(
+        labels, predictions, labels=list(range(len(names))), target_names=names, zero_division=0
+    ))
+    matrix = confusion_matrix(labels, predictions, labels=list(range(len(names))))
+    print("Out-of-fold confusion matrix (rows: true, columns: predicted):")
+    print(names)
+    print(matrix)
+
+    path = os.path.join(BASE_OUTPUT_DIR, folder_list, "confusion_matrix.csv")
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["true \\ predicted", *names])
+        for name, row in zip(names, matrix):
+            writer.writerow([name, *row])
+
+
+def write_trials(study, folder_list):
+    path = os.path.join(BASE_OUTPUT_DIR, folder_list, "optuna_results.csv")
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "trial", "state", "mean_fold_f1", "std_fold_f1", "oof_macro_f1",
+            "oof_weighted_f1", "learning_rate", "best_epochs",
+        ])
+        for t in study.trials:
+            oof = t.user_attrs.get("out_of_fold_scores", {})
+            writer.writerow([
+                t.number,
+                t.state.name,
+                t.value,
+                t.user_attrs.get("std_fold_f1"),
+                oof.get("macro_f1"),
+                oof.get("weighted_f1"),
+                t.params.get("learning_rate"),
+                t.user_attrs.get("best_epochs"),
+            ])
+
+
+# ---------- Main ----------
+
+def parse_args():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--folder-list", default=DEFAULT_FOLDER_LIST)
+    parser.add_argument("--folds", type=int, default=NUM_FOLDS)
+    parser.add_argument("--trials", type=int, default=N_TRIALS)
+    parser.add_argument("--base-model", default=BASE_MODEL)
+    parser.add_argument(
+        "--metric",
+        choices=("macro", "weighted"),
+        default="macro",
+        help="F1 average to optimise; macro weighs rare folders equally (default)",
+    )
+    parser.add_argument("--target-f1", type=float, default=TARGET_F1)
+    parser.add_argument("--publish", action="store_true", help="upload the final model to GCS")
+    return parser.parse_args()
+
+
+def main():
+    options = parse_args()
+    label2id = label_ids(options.folder_list)
+    os.makedirs(os.path.join(BASE_OUTPUT_DIR, options.folder_list), exist_ok=True)
+
+    tokenizer = DistilBertTokenizerFast.from_pretrained(
+        options.base_model,
+        clean_up_tokenization_spaces=True,
+    )
+    db = SessionLocal()
+    try:
+        texts, labels, groups = load_data(db, options.folder_list, label2id)
+    finally:
+        db.close()
+    id2label = {index: label for label, index in label2id.items()}
+    print(
+        f"{len(texts)} labelled mails in {len(set(groups))} case groups:",
+        dict(Counter(id2label[label] for label in labels)),
+    )
+    folds = make_folds(labels, groups, options.folds)
+    labels_arr = np.array(labels)
+
+    # Labels without any mail get the largest weight instead of breaking the weighting.
+    present = np.unique(labels_arr)
+    present_weights = compute_class_weight(class_weight="balanced", classes=present, y=labels_arr)
+    class_weights = np.full(len(label2id), present_weights.max())
+    class_weights[present] = present_weights
+
+    # One persistent study per folder list, metric, fold count and base model.
+    study = optuna.create_study(
+        direction="maximize",
+        study_name=(
+            f"distilbert_{options.folder_list}_{options.metric}_cv{options.folds}_"
+            f"{options.base_model.replace('/', '-')}"
+        ),
+        storage=STUDY_STORAGE,
+        load_if_exists=True,
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=2),
+    )
+    study.optimize(
+        lambda trial: objective(
+            trial, (texts, labels, folds, label2id), tokenizer, class_weights, options
+        ),
+        n_trials=options.trials,
+        gc_after_trial=True,
+    )
+
+    best_trial = study.best_trial
+    write_trials(study, options.folder_list)
+    report(best_trial, labels, label2id, options.folder_list)
+
+    # Final training on all labelled mails, as long as early stopping kept on average.
+    num_epochs = max(1, int(round(np.median(best_trial.user_attrs["best_epochs"]))))
+    final_model = _new_model(options.base_model, label2id, class_weights)
     final_trainer = Trainer(
         model=final_model,
-        args=final_args,
-        train_dataset=final_dataset,
-        eval_dataset=final_dataset,
-        compute_metrics=compute_metrics,
+        args=_training_args(
+            f"{BASE_OUTPUT_DIR}/{options.folder_list}/final",
+            best_trial.params.get("learning_rate", 3e-5),
+            num_epochs,
+            False,
+            options.metric,
+        ),
+        train_dataset=EmailDataset(texts, labels, tokenizer, MAX_LENGTH),
     )
-
     final_trainer.train()
 
-    # Deployment
-    final_model.save_pretrained(DEPLOY_DIR)
-    tokenizer.save_pretrained(DEPLOY_DIR)
-    print(f"\nDeployed model saved to: {DEPLOY_DIR}")
+    # Saved as a plain classifier; the class weights only matter for training.
+    final_model.config.architectures = ["DistilBertForSequenceClassification"]
+    deploy_dir, gcs_prefix = model_location(options.folder_list)
+    deploy_dir.mkdir(parents=True, exist_ok=True)
+    final_model.save_pretrained(deploy_dir)
+    tokenizer.save_pretrained(deploy_dir)
+    print(f"\nModel ({num_epochs} epochs) saved to: {deploy_dir}")
 
-    # Confusion Matrix
-    dataloader = torch.utils.data.DataLoader(
-        final_dataset,
-        batch_size=best_bs,
-        shuffle=False,
-    )
-
-    final_model.eval()
-    all_preds, all_true = [], []
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    final_model.to(device)
-
-    with torch.no_grad():
-        for batch in dataloader:
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            labels_batch = batch["labels"].to(device)
-
-            outputs = final_model(input_ids=input_ids, attention_mask=attention_mask)
-            preds = torch.argmax(outputs["logits"], dim=-1)
-
-            all_preds.extend(preds.cpu().numpy())
-            all_true.extend(labels_batch.cpu().numpy())
-
-    cm = confusion_matrix_per_class(all_true, all_preds)
-    print("\nConfusion Matrix:")
-    print(cm)
-    print("\nLabels mapping:", LABEL2ID)
+    if options.publish:
+        if not gcs.upload_directory(deploy_dir, gcs_prefix):
+            raise RuntimeError("GCS is not configured (GCS_BUCKET); model not published")
+        print(f"Published to GCS prefix {gcs_prefix}; send RELOAD MODEL to use it.")
+    else:
+        print(
+            "Not published: the service loads models from GCS when GCS_BUCKET is set, "
+            "so rerun with --publish to deploy."
+        )
 
 
 if __name__ == "__main__":
