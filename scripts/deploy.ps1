@@ -20,6 +20,7 @@ param(
     [string]$ImapHostSecret = "imap-host",
     [string]$ImapUserSecret = "imap-user",
     [string]$ImapPasswordSecret = "imap-password",
+    [string]$AnthropicApiKeySecret = "anthropic-api-key",
     [switch]$UpdateNerModel,
     [string]$NerModelDirectory = ".\models\ner-smio"
 )
@@ -338,6 +339,21 @@ $secretBindings = @(
     "IMAP_USER=$ImapUserSecret`:latest",
     "IMAP_PASSWORD=$ImapPasswordSecret`:latest"
 )
+# Optional: without it, reply-based status updates wait for a key.
+$previousErrorActionPreference = $ErrorActionPreference
+try {
+    $ErrorActionPreference = "Continue"
+    & gcloud secrets describe $AnthropicApiKeySecret "--project=$ProjectId" "--format=value(name)" 2>&1 | Out-Null
+    $anthropicSecretExitCode = $LASTEXITCODE
+}
+finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+}
+if ($anthropicSecretExitCode -eq 0) {
+    $secretBindings += "ANTHROPIC_API_KEY=$AnthropicApiKeySecret`:latest"
+} else {
+    Write-Host "Secret '$AnthropicApiKeySecret' not found; deploying without ANTHROPIC_API_KEY."
+}
 
 Write-Host "Deploying Cloud Run service..."
 $NerModelRevision = ""
