@@ -152,3 +152,6 @@ marimo/
 # TEMPORARY FILES
 # ---------------------------------------------------------
 tempCodeRunnerFile.py
+
+# Labelled company mail dataset: kept local only
+t1a-arbeitsblatt.tsv
