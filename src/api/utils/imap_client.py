@@ -6,7 +6,6 @@ from src.db.database import SessionLocal
 from src.db.models import Email
 
 from .folder_rules import (
-    CLASSIFICATION_FOLDERS,
     FOLDER_RULES,
     TRASH_FOLDER,
     classification_for_folder,
@@ -38,12 +37,12 @@ def _classification_from_folder(folder):
 
 
 def move_email_to_classification_folder(mailbox, email):
-    if email.classification not in CLASSIFICATION_FOLDERS:
+    destination = folder_for_classification(email.classification)
+    if destination is None:
         return None
     if not email.uid:
         raise ValueError(f"Email {email.id} has no IMAP UID")
 
-    destination = folder_for_classification(email.classification)
     if not mailbox.folder.exists(destination):
         mailbox.folder.create(destination)
     mailbox.move(email.uid, destination)
@@ -72,10 +71,8 @@ def move_email_to_inbox(mailbox, email):
 
 
 def _folder_names(mailbox):
-    known_folders = {
-        folder_for_classification(classification)
-        for classification in CLASSIFICATION_FOLDERS
-    }
+    # Disabled folders are still scanned so corrections and retention keep working.
+    known_folders = {rule["folder"] for rule in FOLDER_RULES.values()}
     return [
         "INBOX",
         *[
