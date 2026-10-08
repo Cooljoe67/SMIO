@@ -5,7 +5,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.api.routers import inbox as inbox_router
-from src.api.utils import command_processor, inbox_processor
+from src.api.utils import command_processor, imap_client, inbox_processor
+from src.config import primary_account
 from src.db.database import get_db
 from src.db.models import Email
 
@@ -57,12 +58,13 @@ class FakeMailBox:
 @pytest.fixture
 def mailbox(monkeypatch):
     fake = FakeMailBox()
-    monkeypatch.setattr(inbox_processor, "MailBox", lambda host: fake)
+    monkeypatch.setattr(imap_client, "MailBox", lambda host: fake)
     return fake
 
 
 def _email(db, batch, folder, source="model", **fields):
     email = Email(
+        account=fields.pop("account", primary_account().id),
         uid=fields.pop("uid", str(batch * 10)),
         message_id=fields.pop("message_id", f"<{batch}-{folder}@test>"),
         folder=folder,
@@ -93,7 +95,7 @@ def test_undo_command_accepts_optional_count(body, expected):
 
 @pytest.mark.parametrize("command", ["undo 0", "undo 21"])
 def test_undo_command_rejects_count_out_of_range(db, command):
-    result = command_processor._run_command(db, command)
+    result = command_processor._run_command(db, command, primary_account())
     assert "error" in result
 
 
@@ -102,10 +104,10 @@ def test_undo_command_passes_count(db, monkeypatch):
     monkeypatch.setattr(
         command_processor,
         "undo_processing_batches",
-        lambda db, count: calls.append(count) or ([5, 4], [1, 2], []),
+        lambda db, account, count: calls.append(count) or ([5, 4], [1, 2], []),
     )
 
-    result = command_processor._run_command(db, "undo 2")
+    result = command_processor._run_command(db, "undo 2", primary_account())
 
     assert calls == [2]
     assert result["batch_ids"] == [5, 4]
@@ -119,7 +121,7 @@ def test_undo_restores_last_n_batches_skipping_smio_only_batches(db, mailbox):
     second = _email(db, 3, "INBOX/Commercial", classification="commercial")
     summary = _email(db, 4, "INBOX", source="system", classification="other")
 
-    batch_ids, restored, errors = inbox_processor.undo_processing_batches(db, 2)
+    batch_ids, restored, errors = inbox_processor.undo_processing_batches(db, primary_account(), 2)
 
     assert batch_ids == [3, 2]
     assert sorted(restored) == sorted([first.id, second.id])
@@ -142,9 +144,9 @@ def test_undo_restores_last_n_batches_skipping_smio_only_batches(db, mailbox):
 
 def test_undone_mails_are_not_processed_again(db, mailbox):
     _email(db, 1, "INBOX/Delivery")
-    inbox_processor.undo_processing_batches(db, 1)
+    inbox_processor.undo_processing_batches(db, primary_account(), 1)
 
-    _, results, errors = inbox_processor.process_unprocessed_emails(db)
+    _, results, errors = inbox_processor.process_unprocessed_emails(db, primary_account())
 
     assert results == []
     assert errors == []
@@ -153,7 +155,7 @@ def test_undone_mails_are_not_processed_again(db, mailbox):
 def test_undo_skips_removed_mails(db, mailbox):
     removed = _email(db, 1, "Papierkorb", removed_at=datetime(2026, 10, 7))
 
-    batch_ids, restored, _ = inbox_processor.undo_processing_batches(db, 1)
+    batch_ids, restored, _ = inbox_processor.undo_processing_batches(db, primary_account(), 1)
 
     assert batch_ids == []
     assert restored == []
@@ -164,7 +166,7 @@ def test_undo_skips_removed_mails(db, mailbox):
 
 def test_undo_rejects_invalid_count(db):
     with pytest.raises(ValueError):
-        inbox_processor.undo_processing_batches(db, 0)
+        inbox_processor.undo_processing_batches(db, primary_account(), 0)
 
 
 def test_undo_endpoint_accepts_count(db, monkeypatch):
@@ -172,7 +174,7 @@ def test_undo_endpoint_accepts_count(db, monkeypatch):
     monkeypatch.setattr(
         inbox_router,
         "undo_processing_batches",
-        lambda db, count: calls.append(count) or ([2, 1], [7], []),
+        lambda db, account, count: calls.append(count) or ([2, 1], [7], []),
     )
     app = FastAPI()
     app.include_router(inbox_router.router)

@@ -15,7 +15,7 @@ from src.api.utils.command_processor import process_instruction_mails
 from src.api.utils.imap_client import fetch_inbox
 from src.api.utils.inbox_processor import process_unprocessed_emails
 from src.api.utils.mailer import append_summary_to_inbox
-from src.config import reload_config
+from src.config import get_config, reload_config
 from src.db.database import SessionLocal, persist_database
 from src.db.models import SummarySnapshot
 
@@ -46,28 +46,43 @@ def _run_exclusively(name, routine):
         _workflow_lock.release()
 
 
+def _process_account(account, is_primary):
+    fetch_result = fetch_inbox(account)
+    instruction_result = process_instruction_mails(account, is_primary=is_primary)
+
+    db = SessionLocal()
+    try:
+        batch_id, results, errors = process_unprocessed_emails(db, account)
+    finally:
+        db.close()
+
+    return {
+        "fetch": fetch_result,
+        "instructions": instruction_result,
+        "batch_id": batch_id,
+        "processed": len(results),
+        "ner_processed": sum(result["ner_executed"] for result in results),
+        "moved": sum("folder" in result for result in results),
+        "failed": len(errors),
+        "errors": errors,
+    }
+
+
 def run_five_minute_workflow():
-    """Fetch, handle instructions, then classify newly received messages."""
+    """Per account: fetch, handle instructions, then classify new messages."""
     def routine():
-        fetch_result = fetch_inbox()
-        instruction_result = process_instruction_mails()
-
-        db = SessionLocal()
-        try:
-            batch_id, results, errors = process_unprocessed_emails(db)
-        finally:
-            db.close()
-
-        return {
-            "fetch": fetch_result,
-            "instructions": instruction_result,
-            "batch_id": batch_id,
-            "processed": len(results),
-            "ner_processed": sum(result["ner_executed"] for result in results),
-            "moved": sum("folder" in result for result in results),
-            "failed": len(errors),
-            "errors": errors,
-        }
+        results = {}
+        for position, account in enumerate(get_config().accounts):
+            if account.provider != "imap":
+                results[account.id] = {"skipped": True, "reason": f"provider_{account.provider}_not_supported"}
+                continue
+            try:
+                results[account.id] = _process_account(account, is_primary=position == 0)
+            except Exception as error:
+                # One broken mailbox must not stop the other accounts.
+                logger.exception("Five-minute workflow failed for account %s", account.id)
+                results[account.id] = {"error": str(error)}
+        return {"accounts": results}
 
     return _run_exclusively("five-minute workflow", routine)
 

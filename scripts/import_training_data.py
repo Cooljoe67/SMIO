@@ -1,20 +1,18 @@
 # scripts/import_training_data.py
 
-from imap_tools import MailBox
+from src.config import primary_account
 from src.db.database import SessionLocal
 from src.db.models import Email
-from src.api.utils.settings import email_settings
 from src.api.utils.folder_rules import folder_path, folder_rules
+from src.api.utils.imap_client import open_mailbox
 
 def import_training_data():
     db = SessionLocal()
+    account = primary_account()
 
-    with MailBox(email_settings.host).login(
-        email_settings.user,
-        email_settings.password
-    ) as mailbox:
-        for label in folder_rules():
-            folder = folder_path(label)
+    with open_mailbox(account) as mailbox:
+        for label in folder_rules(account):
+            folder = folder_path(label, account)
 
             # Check if folder exists
             try:
@@ -27,6 +25,7 @@ def import_training_data():
 
             for msg in mailbox.fetch():
                 email = Email(
+                    account=account.id,
                     subject=msg.subject,
                     sender=msg.from_,
                     date=msg.date,

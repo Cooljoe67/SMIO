@@ -25,7 +25,13 @@ def _stub(name, **attrs):
 
 
 # Model modules pull in torch/transformers; the inbox logic only needs their names.
-_stub("src.ai.classifier", predict_text=lambda text: ("other", 0.5), reload_model=lambda: None)
+_stub(
+    "src.ai.classifier",
+    DEFAULT_FOLDER_LIST="default",
+    predict_text=lambda text, folder_list="default": ("other", 0.5),
+    model_available=lambda folder_list: True,
+    reload_model=lambda folder_list="default": None,
+)
 _stub(
     "src.ai.ner",
     amazon_sender_status=lambda *args: None,

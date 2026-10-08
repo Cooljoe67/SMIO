@@ -4,28 +4,28 @@ from email.utils import parseaddr
 
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
-from imap_tools import MailBox
-from src.ai.classifier import predict_text
+from src.ai import classifier
 from src.ai.email_metadata import extract_email_metadata, serialize_sources
 from src.ai.ner import amazon_sender_status, serialize_entities
 from src.db.models import Email
+from src.api.utils.folder_rules import classification_folders, inbox_folder
 from src.api.utils.imap_client import (
     move_email_to_classification_folder,
     move_email_to_inbox,
+    open_mailbox,
 )
-from src.api.utils.settings import email_settings
 
 
 logger = logging.getLogger(__name__)
 
 
-def _is_smio_mail(sender):
+def _is_smio_mail(sender, account):
     sender_address = parseaddr(sender or "")[1].strip().casefold()
-    smio_address = parseaddr(email_settings.user or "")[1].strip().casefold()
+    smio_address = parseaddr(account.email or "")[1].strip().casefold()
     return bool(smio_address and sender_address == smio_address)
 
 
-def process_email_by_id(email_id: int, db: Session, batch_id: int = None, mailbox=None):
+def process_email_by_id(email_id: int, db: Session, account, batch_id: int = None, mailbox=None):
     """
     Full processing pipeline:
     - Load email
@@ -42,7 +42,7 @@ def process_email_by_id(email_id: int, db: Session, batch_id: int = None, mailbo
         return None
 
     try:
-        if _is_smio_mail(email.sender):
+        if _is_smio_mail(email.sender, account):
             email.classification = "other"
             email.classification_source = "system"
             email.confidence = None
@@ -50,7 +50,7 @@ def process_email_by_id(email_id: int, db: Session, batch_id: int = None, mailbo
             email.processing_batch = batch_id
             email.processed_at = datetime.now(timezone.utc).replace(tzinfo=None)
             db.commit()
-            logger.info("Email %s from SMIO left in INBOX without classification", email_id)
+            logger.info("Email %s from SMIO left in the inbox without classification", email_id)
             return {
                 "email_id": email_id,
                 "classification": "other",
@@ -60,13 +60,17 @@ def process_email_by_id(email_id: int, db: Session, batch_id: int = None, mailbo
             }
 
         # 2. Classification
-        classification, confidence = predict_text(email.text)
+        classification, confidence = classifier.predict_text(email.text, account.folder_list)
         amazon_status = amazon_sender_status(
             email.sender,
             email.subject,
             email.text,
         )
-        if classification != "delivery" and amazon_status is not None:
+        if (
+            classification != "delivery"
+            and amazon_status is not None
+            and "delivery" in classification_folders(account)
+        ):
             logger.info(
                 "Email %s: overriding classification %s to delivery from Amazon sender",
                 email_id,
@@ -114,7 +118,7 @@ def process_email_by_id(email_id: int, db: Session, batch_id: int = None, mailbo
             result["sources"] = sources
             result["ner_executed"] = True
 
-        destination = move_email_to_classification_folder(mailbox, email)
+        destination = move_email_to_classification_folder(mailbox, email, account)
         if destination:
             email.folder = destination
             result["folder"] = destination
@@ -137,27 +141,40 @@ def process_email_by_id(email_id: int, db: Session, batch_id: int = None, mailbo
         raise
 
 
-def process_unprocessed_emails(db: Session):
+def process_unprocessed_emails(db: Session, account):
+    # Batch ids are global, so undo can address a batch without its account.
     last_batch_id = db.query(func.max(Email.processing_batch)).scalar() or 0
     batch_id = int(last_batch_id) + 1
     email_ids = [
         email_id
         for (email_id,) in db.query(Email.id)
-        .filter(or_(Email.processed <= 0, Email.processed.is_(None)))
+        .filter(
+            Email.account == account.id,
+            or_(Email.processed <= 0, Email.processed.is_(None)),
+        )
         .all()
     ]
+    if email_ids and not classifier.model_available(account.folder_list):
+        # Leave them unprocessed so they are classified once the model exists.
+        logger.warning(
+            "Account %s: no model for folder list %s yet; %d mails stay in the inbox",
+            account.id,
+            account.folder_list,
+            len(email_ids),
+        )
+        return batch_id, [], [{"error": f"no_model_for_folder_list:{account.folder_list}"}]
     logger.info(
-        "Starting batch %s for %d unprocessed emails",
+        "Account %s: starting batch %s for %d unprocessed emails",
+        account.id,
         batch_id,
         len(email_ids),
     )
 
     results = []
     errors = []
-    with MailBox(email_settings.host).login(
-        email_settings.user,
-        email_settings.password,
-    ) as mailbox:
+    if not email_ids:
+        return batch_id, results, errors
+    with open_mailbox(account) as mailbox:
         for position, email_id in enumerate(email_ids, start=1):
             logger.info("Processing email %d/%d (id=%s)", position, len(email_ids), email_id)
             try:
@@ -165,6 +182,7 @@ def process_unprocessed_emails(db: Session):
                     process_email_by_id(
                         email_id,
                         db,
+                        account,
                         batch_id=batch_id,
                         mailbox=mailbox,
                     )
@@ -185,11 +203,12 @@ def process_unprocessed_emails(db: Session):
 MAX_UNDO_BATCHES = 20
 
 
-def _latest_batch_ids(db: Session, count: int):
+def _latest_batch_ids(db: Session, count: int, account):
     """Most recent batches that moved at least one non-SMIO mail, newest first."""
     rows = (
         db.query(Email.processing_batch)
         .filter(
+            Email.account == account.id,
             Email.processing_batch > 0,
             Email.removed_at.is_(None),
             or_(
@@ -205,8 +224,8 @@ def _latest_batch_ids(db: Session, count: int):
     return [batch_id for (batch_id,) in rows]
 
 
-def undo_processing_batches(db: Session, count: int = 1):
-    """Restore the mails of the last ``count`` processing batches to INBOX.
+def undo_processing_batches(db: Session, account, count: int = 1):
+    """Restore the mails of the account's last ``count`` processing batches to its inbox.
 
     Restored mails keep their processed count, so the next run does not file them
     away again. SMIO's own mails and mails already removed are left untouched.
@@ -214,13 +233,14 @@ def undo_processing_batches(db: Session, count: int = 1):
     if not 1 <= count <= MAX_UNDO_BATCHES:
         raise ValueError(f"count must be between 1 and {MAX_UNDO_BATCHES}")
 
-    batch_ids = _latest_batch_ids(db, count)
+    batch_ids = _latest_batch_ids(db, count, account)
     if not batch_ids:
         return [], [], []
 
     emails = (
         db.query(Email)
         .filter(
+            Email.account == account.id,
             Email.processing_batch.in_(batch_ids),
             Email.removed_at.is_(None),
             or_(
@@ -233,13 +253,10 @@ def undo_processing_batches(db: Session, count: int = 1):
     restored = []
     errors = []
 
-    with MailBox(email_settings.host).login(
-        email_settings.user,
-        email_settings.password,
-    ) as mailbox:
+    with open_mailbox(account) as mailbox:
         for email in emails:
             try:
-                new_uid = move_email_to_inbox(mailbox, email)
+                new_uid = move_email_to_inbox(mailbox, email, account)
                 if new_uid:
                     email.uid = new_uid
                 else:
@@ -247,7 +264,7 @@ def undo_processing_batches(db: Session, count: int = 1):
                         "Email %s: INBOX UID unknown after undo; next sync will resolve it",
                         email.id,
                     )
-                email.folder = "INBOX"
+                email.folder = inbox_folder(account)
                 email.processing_batch = None
                 email.classification_source = "undo"
                 db.commit()

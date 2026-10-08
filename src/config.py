@@ -180,3 +180,8 @@ def get_config():
 def primary_account():
     """The account single-account code paths still use: the first one listed."""
     return get_config().accounts[0]
+
+
+def resolve_account(account_id=None):
+    """The account with this id, or the primary account when no id is given."""
+    return get_config().account(account_id) if account_id else primary_account()

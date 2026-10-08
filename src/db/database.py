@@ -6,6 +6,7 @@ from pathlib import Path
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 
+from src.config import primary_account
 from src.storage import gcs
 
 
@@ -61,6 +62,7 @@ def persist_database():
 
 def ensure_email_columns():
     required_columns = {
+        "account": "TEXT",
         "order_id": "TEXT",
         "tracking_id": "TEXT",
         "entity_date": "TEXT",
@@ -93,6 +95,14 @@ def ensure_email_columns():
                 connection.execute(
                     text(f"ALTER TABLE emails ADD COLUMN {column_name} {column_type}")
                 )
+        # Mails from before multi-account support belong to the primary account.
+        connection.execute(
+            text("UPDATE emails SET account = :account WHERE account IS NULL"),
+            {"account": primary_account().id},
+        )
+        connection.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_emails_account ON emails (account)")
+        )
         connection.execute(
             text("UPDATE emails SET processed = 0 WHERE processed IS NULL")
         )

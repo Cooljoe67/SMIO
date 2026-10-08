@@ -10,11 +10,21 @@ from .folder_rules import (
     folder_for_classification,
     folder_path,
     folder_rules,
+    inbox_folder,
     trash_folder,
 )
-from .settings import email_settings
 
 logger = logging.getLogger(__name__)
+
+
+def open_mailbox(account):
+    """Log in to an account's mailbox; use as a context manager."""
+    if account.provider != "imap":
+        raise NotImplementedError(
+            f"Account {account.id!r}: provider {account.provider!r} is not supported yet"
+        )
+    return MailBox(account.imap.host).login(account.imap.username, account.imap.password)
+
 
 def _message_id(message):
     headers = getattr(message, "headers", {}) or {}
@@ -33,12 +43,8 @@ def _is_seen(message):
     )
 
 
-def _classification_from_folder(folder):
-    return classification_for_folder(folder)
-
-
-def move_email_to_classification_folder(mailbox, email):
-    destination = folder_for_classification(email.classification)
+def move_email_to_classification_folder(mailbox, email, account):
+    destination = folder_for_classification(email.classification, account)
     if destination is None:
         return None
     if not email.uid:
@@ -50,19 +56,20 @@ def move_email_to_classification_folder(mailbox, email):
     return destination
 
 
-def move_email_to_inbox(mailbox, email):
-    """Move a mail back to INBOX and return its INBOX UID (None if unknown)."""
+def move_email_to_inbox(mailbox, email, account):
+    """Move a mail back to the inbox and return its inbox UID (None if unknown)."""
+    inbox = inbox_folder(account)
     if not email.uid:
         raise ValueError(f"Email {email.id} has no IMAP UID")
-    if not email.folder or email.folder == "INBOX":
+    if not email.folder or email.folder == inbox:
         return email.uid
 
     source_folder = email.folder
     if not mailbox.folder.exists(source_folder):
         raise ValueError(f"IMAP source folder does not exist: {source_folder}")
     mailbox.folder.set(source_folder, readonly=False)
-    mailbox.move([email.uid], "INBOX")
-    mailbox.folder.set("INBOX", readonly=False)
+    mailbox.move([email.uid], inbox)
+    mailbox.folder.set(inbox, readonly=False)
 
     # UIDs are per folder: the old one may now belong to another INBOX mail.
     if not email.message_id:
@@ -71,52 +78,55 @@ def move_email_to_inbox(mailbox, email):
     return uids[-1] if uids else None
 
 
-def _folder_names(mailbox):
+def _folder_names(mailbox, account):
     # Disabled folders are still scanned so corrections and retention keep working.
-    known_folders = {folder_path(classification) for classification in folder_rules()}
+    known_folders = {
+        folder_path(classification, account) for classification in folder_rules(account)
+    }
     return [
-        "INBOX",
+        inbox_folder(account),
         *[
             folder.name
-            for folder in mailbox.folder.list("INBOX")
+            for folder in mailbox.folder.list()
             if folder.name in known_folders
         ],
     ]
 
 
-def _find_email(db, message_id, uid, folder_name):
+def _find_email(db, account, message_id, uid, folder_name):
+    emails = db.query(Email).filter(Email.account == account.id)
     email_obj = None
     if message_id:
-        email_obj = db.query(Email).filter(Email.message_id == message_id).first()
+        email_obj = emails.filter(Email.message_id == message_id).first()
     if email_obj is None:
-        email_obj = db.query(Email).filter(
+        email_obj = emails.filter(
             Email.uid == uid,
             Email.folder == folder_name,
         ).first()
     return email_obj
 
 
-def _move_to_trash(mailbox, email):
+def _move_to_trash(mailbox, email, account):
     if not email.uid or not email.folder:
         raise ValueError(f"Email {email.id} has no folder or IMAP UID")
-    trash = trash_folder()
+    trash = trash_folder(account)
     if not mailbox.folder.exists(trash):
         mailbox.folder.create(trash)
     mailbox.folder.set(email.folder, readonly=False)
     mailbox.move([email.uid], trash)
-    mailbox.folder.set("INBOX", readonly=False)
+    mailbox.folder.set(inbox_folder(account), readonly=False)
 
 
-def cleanup_expired_mails(db, mailbox):
+def cleanup_expired_mails(db, mailbox, account):
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     moved = 0
     skipped_unread = 0
     errors = []
 
-    for classification, rule in folder_rules().items():
+    for classification, rule in folder_rules(account).items():
         retention_days = rule.retention_days
         retention_days_unread = rule.retention_days_unread
-        folder_name = folder_path(classification)
+        folder_name = folder_path(classification, account)
         active_periods = [
             days for days in (retention_days, retention_days_unread)
             if days is not None
@@ -128,6 +138,7 @@ def cleanup_expired_mails(db, mailbox):
             now - timedelta(days=days) for days in active_periods
         )
         candidates = db.query(Email).filter(
+            Email.account == account.id,
             Email.folder == folder_name,
             Email.date <= candidate_cutoff,
             Email.is_training_data.is_(False),
@@ -162,8 +173,8 @@ def cleanup_expired_mails(db, mailbox):
                         skipped_unread += 1
                     continue
 
-                _move_to_trash(mailbox, email)
-                email.folder = trash_folder()
+                _move_to_trash(mailbox, email, account)
+                email.folder = trash_folder(account)
                 email.removed_at = now
                 email.removal_reason = "retention"
                 moved += 1
@@ -171,7 +182,7 @@ def cleanup_expired_mails(db, mailbox):
                     "Email %s moved from %s to %s after %s retention days (%s)",
                     email.id,
                     folder_name,
-                    trash_folder(),
+                    trash_folder(account),
                     applicable_period,
                     "read" if is_seen else "unread",
                 )
@@ -186,14 +197,14 @@ def cleanup_expired_mails(db, mailbox):
     }
 
 
-def _sync_message(db, msg, folder_name, allow_new):
+def _sync_message(db, account, msg, folder_name, allow_new):
     message_id = _message_id(msg)
-    email_obj = _find_email(db, message_id, msg.uid, folder_name)
+    email_obj = _find_email(db, account, message_id, msg.uid, folder_name)
     new_email = email_obj is None
     if new_email and not allow_new:
         return None
     if new_email:
-        email_obj = Email(message_id=message_id)
+        email_obj = Email(account=account.id, message_id=message_id)
 
     sync_timestamp = datetime.now(timezone.utc).replace(tzinfo=None)
     email_obj.last_seen_at = sync_timestamp
@@ -213,8 +224,8 @@ def _sync_message(db, msg, folder_name, allow_new):
         email_obj.read_at = datetime.now(timezone.utc).replace(tzinfo=None)
         logger.info("Email %s first observed as read", email_obj.id)
 
-    folder_classification = _classification_from_folder(folder_name)
-    previous_folder_classification = _classification_from_folder(previous_folder or "")
+    folder_classification = classification_for_folder(folder_name, account)
+    previous_folder_classification = classification_for_folder(previous_folder or "", account)
     if (
         not new_email
         and folder_classification
@@ -225,7 +236,7 @@ def _sync_message(db, msg, folder_name, allow_new):
         email_obj.classification_source = "imap_folder"
     elif (
         not new_email
-        and folder_name == "INBOX"
+        and folder_name == inbox_folder(account)
         and previous_folder_classification is not None
         and email_obj.classification_source != "undo"
     ):
@@ -241,23 +252,24 @@ def _sync_message(db, msg, folder_name, allow_new):
     return email_obj
 
 
-def sync_existing_mails():
-    """Reconcile known messages across INBOX and classification folders."""
-    with MailBox(email_settings.host).login(email_settings.user, email_settings.password) as mailbox:
+def sync_existing_mails(account):
+    """Reconcile known messages across the inbox and classification folders."""
+    with open_mailbox(account) as mailbox:
         db = SessionLocal()
         try:
             sync_started = datetime.now(timezone.utc).replace(tzinfo=None)
-            active_folders = set(_folder_names(mailbox))
+            active_folders = set(_folder_names(mailbox, account))
             checked = 0
             changed = 0
             for folder_name in active_folders:
                 mailbox.folder.set(folder_name, readonly=True)
                 for msg in mailbox.fetch(mark_seen=False):
-                    email_obj = _sync_message(db, msg, folder_name, allow_new=False)
+                    email_obj = _sync_message(db, account, msg, folder_name, allow_new=False)
                     checked += 1
                     if email_obj is not None:
                         changed += 1
             stale_emails = db.query(Email).filter(
+                Email.account == account.id,
                 Email.folder.in_(active_folders),
                 Email.is_training_data.is_(False),
                 (Email.last_seen_at.is_(None) | (Email.last_seen_at < sync_started)),
@@ -266,7 +278,7 @@ def sync_existing_mails():
                 email.removed_at = sync_started
                 email.removal_reason = "external"
             db.commit()
-            cleanup = cleanup_expired_mails(db, mailbox)
+            cleanup = cleanup_expired_mails(db, mailbox, account)
             db.commit()
             return {"checked": checked, "changed": changed, "cleanup": cleanup}
         except Exception:
@@ -276,17 +288,18 @@ def sync_existing_mails():
             db.close()
 
 
-def fetch_inbox():
-    sync_existing_mails()
-    with MailBox(email_settings.host).login(email_settings.user, email_settings.password) as mailbox:
+def fetch_inbox(account):
+    sync_existing_mails(account)
+    inbox = inbox_folder(account)
+    with open_mailbox(account) as mailbox:
         db = SessionLocal()
         try:
             new_emails = []
-            mailbox.folder.set("INBOX", readonly=True)
+            mailbox.folder.set(inbox, readonly=True)
             for msg in mailbox.fetch(mark_seen=False):
                 message_id = _message_id(msg)
-                was_known = _find_email(db, message_id, msg.uid, "INBOX") is not None
-                email_obj = _sync_message(db, msg, "INBOX", allow_new=True)
+                was_known = _find_email(db, account, message_id, msg.uid, inbox) is not None
+                email_obj = _sync_message(db, account, msg, inbox, allow_new=True)
                 if email_obj is not None and not was_known:
                     new_emails.append(email_obj)
             db.commit()

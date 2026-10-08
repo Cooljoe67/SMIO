@@ -35,6 +35,7 @@ from src.ai.promotion_rules import (
     PROMOTION_MAX_CLASS_RECALL_DROP,
     PROMOTION_MIN_CLASS_SUPPORT,
 )
+from src.config import get_config
 from src.ai.retraining_explainer import (
     explain_retraining,
     explanation_html,
@@ -195,10 +196,20 @@ def _append_log(entry):
         log_file.write(json.dumps(entry) + "\n")
 
 
+def _model_emails(db):
+    """Mails of the accounts whose folder list uses the model retrained here."""
+    account_ids = [
+        account.id
+        for account in get_config().accounts
+        if account.folder_list == classifier.DEFAULT_FOLDER_LIST
+    ]
+    return db.query(Email).filter(Email.account.in_(account_ids))
+
+
 def _pending_corrections(db):
     """Corrections from manual folder moves not yet used by a retrain run."""
     return (
-        db.query(Email)
+        _model_emails(db)
         .filter(
             Email.true_label.isnot(None),
             Email.classification_source == "imap_folder",
@@ -237,7 +248,7 @@ def _route_new_corrections_to_holdout(db, corrections, holdout_ratio=HOLDOUT_RAT
 
 
 def _old_pool_for_label(db, label, exclude_ids):
-    query = db.query(Email).filter(
+    query = _model_emails(db).filter(
         Email.true_label == label,
         Email.is_eval_holdout.is_(False),
     )
@@ -442,7 +453,7 @@ def _promotion_assessment(labels, baseline_predictions, candidate_predictions):
 
 
 def _load_holdout(db):
-    holdout_emails = db.query(Email).filter(Email.is_eval_holdout.is_(True)).all()
+    holdout_emails = _model_emails(db).filter(Email.is_eval_holdout.is_(True)).all()
     texts = [email.text or "" for email in holdout_emails]
     labels = [LABEL2ID[email.true_label] for email in holdout_emails]
     return texts, labels

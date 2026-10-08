@@ -18,18 +18,16 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from imap_tools import MailBox
-
 from src.ai import classifier
 from src.ai.daily_summary import build_daily_summary
 from src.ai.retrain import restore_previous_model, retrain_if_due
 from src.db.database import SessionLocal
 from src.storage import gcs
 
-from .folder_rules import trash_folder
+from .folder_rules import inbox_folder, trash_folder
+from .imap_client import open_mailbox
 from .inbox_processor import MAX_UNDO_BATCHES, undo_processing_batches
 from .mailer import append_summary_to_inbox
-from .settings import email_settings
 
 logger = logging.getLogger(__name__)
 PENDING_COMMANDS_PREFIX = os.getenv(
@@ -72,21 +70,27 @@ def _normalize_command(subject, body):
     return re.sub(r"\s+", " ", match.group(1)).casefold() if match else None
 
 
-def _run_command(db, command):
+def _run_command(db, command, account):
     if command == "undo" or command.startswith("undo "):
         parts = command.split(maxsplit=1)
         count = int(parts[1]) if len(parts) > 1 else 1
         if not 1 <= count <= MAX_UNDO_BATCHES:
             return {"command": command, "error": f"UNDO accepts a batch count from 1 to {MAX_UNDO_BATCHES}."}
-        batch_ids, restored, errors = undo_processing_batches(db, count)
+        batch_ids, restored, errors = undo_processing_batches(db, account, count)
         return {"command": command, "batch_ids": batch_ids, "restored": len(restored), "errors": errors}
+
+    if command in {"retrain", "restore model"} and account.folder_list != classifier.DEFAULT_FOLDER_LIST:
+        return {
+            "command": command,
+            "error": f"Not yet supported for folder list {account.folder_list!r}.",
+        }
 
     if command == "retrain":
         result = retrain_if_due(db, min_corrections=0)
         return {"command": command, **result}
 
     if command == "reload model":
-        classifier.reload_model()
+        classifier.reload_model(account.folder_list)
         return {"command": command, "reloaded": True}
 
     if command == "restore model":
@@ -112,6 +116,7 @@ def _run_command(db, command):
             f"(requested up to {line_count}).",
             subject=f"SMIO API logs ({actual_line_count} lines)",
             attachments=[("smio-api-logs.txt", log_text.encode("utf-8"))],
+            account=account,
         )
         return {"command": command, "sent": sent, "log_lines": actual_line_count}
 
@@ -121,6 +126,7 @@ def _run_command(db, command):
             summary["message"],
             html_body=summary.get("html_message"),
             subject="SMIO Summary (on demand)",
+            account=account,
         )
         return {"command": command, "sent": sent}
 
@@ -157,8 +163,8 @@ def _recent_cloud_run_logs(line_count):
     return "\n".join(lines) or "No Cloud Run API log entries were found."
 
 
-def _delete_message(mailbox, uid):
-    trash = trash_folder()
+def _delete_message(mailbox, uid, account):
+    trash = trash_folder(account)
     if not mailbox.folder.exists(trash):
         mailbox.folder.create(trash)
     mailbox.move([uid], trash)
@@ -174,8 +180,9 @@ def _command_failed(result):
     )
 
 
-def _attempt_id(uid):
-    return hashlib.sha256(str(uid).encode("utf-8")).hexdigest()
+def _attempt_id(account, uid):
+    # UIDs are only unique within one mailbox.
+    return hashlib.sha256(f"{account.id}:{uid}".encode("utf-8")).hexdigest()
 
 
 def _attempt_object(attempt_id):
@@ -220,16 +227,20 @@ def _delete_command_attempt(attempt_id):
         (LOCAL_PENDING_COMMANDS_DIR / f"{attempt_id}.json").unlink(missing_ok=True)
 
 
-def _notify_command_failure(command, reason):
+def _notify_command_failure(command, reason, account):
     body = (
         f"The SMIO command '{command.upper()}' was not successful.\n\n"
         f"{reason}\n"
         "Check the Cloud Run logs for details."
     )
-    return append_summary_to_inbox(body, subject="SMIO command unsuccessful")
+    return append_summary_to_inbox(
+        body,
+        subject="SMIO command unsuccessful",
+        account=account,
+    )
 
 
-def _record_command_failure(attempt_id, attempt, reason):
+def _record_command_failure(attempt_id, attempt, reason, account):
     attempt["status"] = "failed"
     attempt["failure_reason"] = reason
     attempt["failed_at"] = datetime.now(timezone.utc).isoformat()
@@ -238,16 +249,19 @@ def _record_command_failure(attempt_id, attempt, reason):
     except Exception:
         logger.exception("Could not persist failure state for command %s", attempt["command"])
 
-    if _notify_command_failure(attempt["command"], reason):
+    if _notify_command_failure(attempt["command"], reason, account):
         _delete_command_attempt(attempt_id)
     else:
         logger.error("Could not append failure notice for command %s", attempt["command"])
 
 
-def _check_timed_out_commands():
+def _check_timed_out_commands(account, is_primary):
     now = datetime.now(timezone.utc)
     timeout = timedelta(minutes=COMMAND_TIMEOUT_MINUTES)
     for attempt_id, attempt in _load_command_attempts():
+        # Attempts saved before accounts existed belong to the primary account.
+        if attempt.get("account", account.id if is_primary else None) != account.id:
+            continue
         if attempt.get("status") == "completed":
             _delete_command_attempt(attempt_id)
             continue
@@ -275,25 +289,25 @@ def _check_timed_out_commands():
             except Exception:
                 logger.exception("Could not persist timeout state for command %s", attempt.get("command"))
 
-        if _notify_command_failure(attempt["command"], reason):
+        if _notify_command_failure(attempt["command"], reason, account):
             _delete_command_attempt(attempt_id)
         else:
             logger.error("Could not append failure notice for command %s", attempt.get("command"))
 
 
-def process_instruction_mails():
+def process_instruction_mails(account, is_primary=False):
     """Find commands, trash them before execution, and report caught failures."""
     executed = []
     errors = []
     try:
-        _check_timed_out_commands()
+        _check_timed_out_commands(account, is_primary)
     except Exception:
         logger.exception("Could not check pending command attempts")
 
-    owner = (email_settings.user or "").strip().lower()
+    owner = (account.email or "").strip().lower()
 
-    with MailBox(email_settings.host).login(email_settings.user, email_settings.password) as mailbox:
-        mailbox.folder.set("INBOX", readonly=False)
+    with open_mailbox(account) as mailbox:
+        mailbox.folder.set(inbox_folder(account), readonly=False)
 
         # Collect matches first: mutating folders while a fetch() generator is open is unsafe.
         matches = []
@@ -308,8 +322,9 @@ def process_instruction_mails():
         try:
             for uid, command in matches:
                 logger.info("Instruction mail detected: %s (uid=%s)", command, uid)
-                attempt_id = _attempt_id(uid)
+                attempt_id = _attempt_id(account, uid)
                 attempt = {
+                    "account": account.id,
                     "uid": str(uid),
                     "command": command,
                     "started_at": datetime.now(timezone.utc).isoformat(),
@@ -317,7 +332,7 @@ def process_instruction_mails():
                 }
                 try:
                     _save_command_attempt(attempt_id, attempt)
-                    _delete_message(mailbox, uid)
+                    _delete_message(mailbox, uid, account)
                 except Exception as error:
                     errors.append({"command": command, "error": str(error)})
                     logger.exception("Could not prepare instruction command %s", command)
@@ -325,11 +340,12 @@ def process_instruction_mails():
                         attempt_id,
                         attempt,
                         "The command could not be safely started or removed from the inbox.",
+                        account,
                     )
                     continue
 
                 try:
-                    result = _run_command(db, command)
+                    result = _run_command(db, command, account)
                     executed.append(result)
                     if _command_failed(result):
                         reason = "The command returned an unsuccessful result."
@@ -338,7 +354,7 @@ def process_instruction_mails():
                             "error": reason,
                         })
                         logger.error("Instruction command %s was not successful", command)
-                        _record_command_failure(attempt_id, attempt, reason)
+                        _record_command_failure(attempt_id, attempt, reason, account)
                     else:
                         attempt["status"] = "completed"
                         attempt["completed_at"] = datetime.now(timezone.utc).isoformat()
@@ -351,6 +367,7 @@ def process_instruction_mails():
                         attempt_id,
                         attempt,
                         "The command raised an error during execution.",
+                        account,
                     )
         finally:
             db.close()

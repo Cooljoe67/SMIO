@@ -13,6 +13,8 @@ class Email(Base):
     __tablename__ = "emails"
 
     id = Column(Integer, primary_key=True, index=True)
+    # Id of the configured account (config/smio.yaml) the mail belongs to.
+    account = Column(String, index=True)
     uid = Column(String, index=True)
     message_id = Column(String, index=True)
     folder = Column(String, default="INBOX")

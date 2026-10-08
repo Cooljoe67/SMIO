@@ -1,4 +1,4 @@
-"""Appends summary emails to the configured IMAP inbox."""
+"""Appends summary emails to an account's own inbox."""
 
 import logging
 from email.mime.multipart import MIMEMultipart
@@ -6,9 +6,10 @@ from email.mime.application import MIMEApplication
 from email.mime.text import MIMEText
 from email.utils import formataddr
 
-from imap_tools import MailBox
+from src.config import primary_account
 
-from .settings import email_settings
+from .folder_rules import inbox_folder
+from .imap_client import open_mailbox
 
 logger = logging.getLogger(__name__)
 
@@ -18,10 +19,9 @@ def append_summary_to_inbox(
     html_body=None,
     subject="SMIO Daily Summary",
     attachments=None,
+    account=None,
 ):
-    if not all((email_settings.host, email_settings.user, email_settings.password)):
-        logger.info("IMAP not configured, skipping summary inbox append")
-        return False
+    account = account or primary_account()
 
     if attachments:
         message = MIMEMultipart("mixed")
@@ -47,17 +47,14 @@ def append_summary_to_inbox(
     else:
         message = MIMEText(body, "plain", "utf-8")
     message["Subject"] = subject
-    message["From"] = formataddr(("Smio, der Mail Organizer", email_settings.user))
-    message["To"] = email_settings.user
-    message["Reply-To"] = email_settings.user
+    message["From"] = formataddr(("Smio, der Mail Organizer", account.email))
+    message["To"] = account.email
+    message["Reply-To"] = account.email
 
     try:
-        with MailBox(email_settings.host).login(
-            email_settings.user,
-            email_settings.password,
-        ) as mailbox:
-            mailbox.append(message.as_bytes(), folder="INBOX")
-        logger.info("Daily summary appended to %s", email_settings.user)
+        with open_mailbox(account) as mailbox:
+            mailbox.append(message.as_bytes(), folder=inbox_folder(account))
+        logger.info("Daily summary appended to %s", account.email)
         return True
     except Exception:
         logger.exception("Failed to append daily summary to the IMAP inbox")

@@ -54,5 +54,9 @@ def classification_for_folder(folder, account=None):
     return None
 
 
+def inbox_folder(account=None):
+    return _account(account).mailbox.inbox
+
+
 def trash_folder(account=None):
     return _account(account).mailbox.trash
