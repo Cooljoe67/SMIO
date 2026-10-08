@@ -1,0 +1,68 @@
+# SMIO configuration: folder lists and mail accounts.
+#
+# In production this file is read from GCS (GCS_CONFIG_OBJECT, default
+# config/smio.yaml) at the start of every workflow run, so changes apply
+# without a redeploy. This copy is the local default and the initial upload.
+#
+# Never put secrets here. Use ${ENV_VAR} (or ${ENV_VAR:-default}) to read
+# values from the environment / .env instead.
+
+# Each folder list is named after the classifier model trained for it. Its
+# keys (plus the implicit "other", which stays in the inbox) are the model's
+# labels, so adding or removing a folder means a new list and a new model.
+# "enabled: false" keeps the label but leaves those mails in the inbox.
+folder_lists:
+  default:
+    delivery:
+      enabled: true
+      retention_days: null
+      retention_days_unread: 20
+    tech:
+      enabled: true
+      retention_days: 1
+      retention_days_unread: 20
+    social:
+      enabled: true
+      retention_days: 5
+      retention_days_unread: 20
+    commercial:
+      enabled: true
+      retention_days: 10
+      retention_days_unread: 20
+
+accounts:
+  - id: primary
+    provider: imap            # imap | gmail | exchange (gmail and exchange: not yet supported)
+    email: ${IMAP_USER}
+    user_first_name: ${USER_FIRST_NAME:-there}
+    folder_list: default
+    mailbox:
+      inbox: INBOX
+      folder_root: INBOX      # classification folders become <folder_root>/<folder>
+      trash: Papierkorb
+    imap:
+      host: ${IMAP_HOST}
+      username: ${IMAP_USER}
+      password: ${IMAP_PASSWORD}
+
+  # Gmail (OAuth2 client of a Google Cloud project, refresh token per mailbox):
+  # - id: gmail-example
+  #   provider: gmail
+  #   email: someone@gmail.com
+  #   folder_list: default
+  #   mailbox: {inbox: INBOX, folder_root: smio, trash: "[Gmail]/Trash"}
+  #   gmail:
+  #     client_id: ${GMAIL_CLIENT_ID}
+  #     client_secret: ${GMAIL_CLIENT_SECRET}
+  #     refresh_token: ${GMAIL_EXAMPLE_REFRESH_TOKEN}
+
+  # Microsoft Exchange Online (Entra ID app registration with Mail.ReadWrite):
+  # - id: exchange-example
+  #   provider: exchange
+  #   email: someone@company.com
+  #   folder_list: default
+  #   mailbox: {inbox: Inbox, folder_root: Inbox, trash: Deleted Items}
+  #   exchange:
+  #     tenant_id: ${EXCHANGE_TENANT_ID}
+  #     client_id: ${EXCHANGE_CLIENT_ID}
+  #     client_secret: ${EXCHANGE_CLIENT_SECRET}

@@ -12,6 +12,7 @@ numpy
 fastapi
 uvicorn[standard]
 pydantic-settings
+pyyaml
 
 # Email handling
 imap-tools

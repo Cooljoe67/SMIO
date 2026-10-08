@@ -331,7 +331,7 @@ GCP_REGION=your-cloud-run-and-artifact-region
 GCP_SCHEDULER_LOCATION=your-cloud-scheduler-region
 GCS_BUCKET=your-gcs-bucket
 
-# IMAP (required)
+# IMAP (required; referenced as ${IMAP_...} from config/smio.yaml)
 IMAP_HOST=imap.yourprovider.com
 IMAP_USER=your_email@example.com
 IMAP_PASSWORD=your_password
@@ -345,8 +345,12 @@ USER_FIRST_NAME=Example User
 GCS_CLASSIFIER_MODEL_PREFIX=models/distilbert_deployed
 GCS_NER_MODEL_PREFIX=models/ner-smio
 GCS_DATABASE_OBJECT=databases/smio.db
+# Folder lists and accounts; re-read from GCS on every workflow run.
+GCS_CONFIG_OBJECT=config/smio.yaml
 SMIO_COMMAND_TIMEOUT_MINUTES=15
 ```
+
+Folder lists (one classifier model per list), per-folder on/off switches, retention and mail accounts are configured in [config/smio.yaml](config/smio.yaml). Secrets stay in the environment and are referenced as `${VAR}`.
 
 When `GCS_BUCKET` is configured, SMIO downloads the deployed model and database at
 startup. The first GCS-enabled run uploads its existing local artifacts if the bucket

@@ -15,7 +15,7 @@ from src.ai.retraining_explainer import (
     explanation_text_lines,
     technical_lines,
 )
-from src.api.utils.folder_rules import CLASSIFICATION_FOLDERS
+from src.api.utils.folder_rules import classification_folders
 from src.api.utils.settings import app_settings
 from src.db.models import Email, RetrainRun, SummarySnapshot
 
@@ -255,7 +255,7 @@ def build_daily_summary(db, summary_date=None, persist=False):
     })
     new_counts = {
         classification: sum(1 for email in emails if email.classification == classification)
-        for classification in CLASSIFICATION_FOLDERS
+        for classification in classification_folders()
     }
     new_counts["other"] = sum(1 for email in emails if email.classification == "other")
     removed_counts = {
@@ -266,7 +266,7 @@ def build_daily_summary(db, summary_date=None, persist=False):
             and email.removal_reason == "retention"
             and email.removed_at >= period_start
         )
-        for classification in (*CLASSIFICATION_FOLDERS, "other")
+        for classification in (*classification_folders(), "other")
     }
     unread_counts = {
         classification: sum(
@@ -275,7 +275,7 @@ def build_daily_summary(db, summary_date=None, persist=False):
             and email.read_at is None
             and email.removed_at is None
         )
-        for classification in (*CLASSIFICATION_FOLDERS, "other")
+        for classification in (*classification_folders(), "other")
     }
     pending_corrections = sum(
         1 for email in all_emails

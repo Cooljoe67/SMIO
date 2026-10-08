@@ -11,6 +11,7 @@ COPY requirements-runtime.txt .
 RUN pip install --no-cache-dir -r requirements-runtime.txt
 
 COPY src ./src
+COPY config ./config
 
 RUN useradd --create-home --uid 10001 smio \
     && mkdir -p /app/models \

@@ -6,10 +6,11 @@ from src.db.database import SessionLocal
 from src.db.models import Email
 
 from .folder_rules import (
-    FOLDER_RULES,
-    TRASH_FOLDER,
     classification_for_folder,
     folder_for_classification,
+    folder_path,
+    folder_rules,
+    trash_folder,
 )
 from .settings import email_settings
 
@@ -72,7 +73,7 @@ def move_email_to_inbox(mailbox, email):
 
 def _folder_names(mailbox):
     # Disabled folders are still scanned so corrections and retention keep working.
-    known_folders = {rule["folder"] for rule in FOLDER_RULES.values()}
+    known_folders = {folder_path(classification) for classification in folder_rules()}
     return [
         "INBOX",
         *[
@@ -98,10 +99,11 @@ def _find_email(db, message_id, uid, folder_name):
 def _move_to_trash(mailbox, email):
     if not email.uid or not email.folder:
         raise ValueError(f"Email {email.id} has no folder or IMAP UID")
-    if not mailbox.folder.exists(TRASH_FOLDER):
-        mailbox.folder.create(TRASH_FOLDER)
+    trash = trash_folder()
+    if not mailbox.folder.exists(trash):
+        mailbox.folder.create(trash)
     mailbox.folder.set(email.folder, readonly=False)
-    mailbox.move([email.uid], TRASH_FOLDER)
+    mailbox.move([email.uid], trash)
     mailbox.folder.set("INBOX", readonly=False)
 
 
@@ -111,10 +113,10 @@ def cleanup_expired_mails(db, mailbox):
     skipped_unread = 0
     errors = []
 
-    for rule in FOLDER_RULES.values():
-        retention_days = rule.get("retention_days")
-        retention_days_unread = rule.get("retention_days_unread")
-        folder_name = rule["folder"]
+    for classification, rule in folder_rules().items():
+        retention_days = rule.retention_days
+        retention_days_unread = rule.retention_days_unread
+        folder_name = folder_path(classification)
         active_periods = [
             days for days in (retention_days, retention_days_unread)
             if days is not None
@@ -161,7 +163,7 @@ def cleanup_expired_mails(db, mailbox):
                     continue
 
                 _move_to_trash(mailbox, email)
-                email.folder = TRASH_FOLDER
+                email.folder = trash_folder()
                 email.removed_at = now
                 email.removal_reason = "retention"
                 moved += 1
@@ -169,7 +171,7 @@ def cleanup_expired_mails(db, mailbox):
                     "Email %s moved from %s to %s after %s retention days (%s)",
                     email.id,
                     folder_name,
-                    TRASH_FOLDER,
+                    trash_folder(),
                     applicable_period,
                     "read" if is_seen else "unread",
                 )

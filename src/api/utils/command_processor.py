@@ -26,7 +26,7 @@ from src.ai.retrain import restore_previous_model, retrain_if_due
 from src.db.database import SessionLocal
 from src.storage import gcs
 
-from .folder_rules import TRASH_FOLDER
+from .folder_rules import trash_folder
 from .inbox_processor import MAX_UNDO_BATCHES, undo_processing_batches
 from .mailer import append_summary_to_inbox
 from .settings import email_settings
@@ -158,9 +158,10 @@ def _recent_cloud_run_logs(line_count):
 
 
 def _delete_message(mailbox, uid):
-    if not mailbox.folder.exists(TRASH_FOLDER):
-        mailbox.folder.create(TRASH_FOLDER)
-    mailbox.move([uid], TRASH_FOLDER)
+    trash = trash_folder()
+    if not mailbox.folder.exists(trash):
+        mailbox.folder.create(trash)
+    mailbox.move([uid], trash)
 
 
 def _command_failed(result):

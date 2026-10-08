@@ -23,6 +23,7 @@ def uploads(tmp_path, monkeypatch):
     monkeypatch.setattr(database, "USING_SQLITE", True)
     monkeypatch.setattr(database, "_published_signature", database._database_signature())
     monkeypatch.setattr(database.gcs, "enabled", lambda: True)
+    monkeypatch.setattr(workflows, "reload_config", lambda: None)
     monkeypatch.setattr(
         database.gcs,
         "upload_file",

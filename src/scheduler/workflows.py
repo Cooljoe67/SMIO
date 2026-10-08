@@ -15,6 +15,7 @@ from src.api.utils.command_processor import process_instruction_mails
 from src.api.utils.imap_client import fetch_inbox
 from src.api.utils.inbox_processor import process_unprocessed_emails
 from src.api.utils.mailer import append_summary_to_inbox
+from src.config import reload_config
 from src.db.database import SessionLocal, persist_database
 from src.db.models import SummarySnapshot
 
@@ -29,6 +30,8 @@ def _run_exclusively(name, routine):
 
     try:
         try:
+            # Pick up folder/account changes made in GCS without a redeploy.
+            reload_config()
             result = routine()
         except Exception:
             # Keep what was committed before the failure, but report the original error.
