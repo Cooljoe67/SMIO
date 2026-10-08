@@ -29,6 +29,10 @@ def open_mailbox(account):
         raise NotImplementedError(
             f"Account {account.id!r}: provider {account.provider!r} is not supported yet"
         )
+    if not account.imap.password:
+        raise RuntimeError(
+            f"Account {account.id!r}: no IMAP password; set the variable its config refers to"
+        )
     return MailBox(account.imap.host).login(account.imap.username, account.imap.password)
 
 

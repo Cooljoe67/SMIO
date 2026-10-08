@@ -91,6 +91,16 @@ def test_broken_reload_keeps_previous_config(use_config, monkeypatch, tmp_path):
     assert config.reload_config() is previous
 
 
+def test_scripts_can_load_the_config_without_the_imap_password(monkeypatch):
+    from src.api.utils import imap_client
+
+    monkeypatch.delenv("IMAP_PASSWORD")
+    parsed = config.parse_config(config.CONFIG_PATH.read_text(encoding="utf-8"))
+
+    with pytest.raises(RuntimeError, match="no IMAP password"):
+        imap_client.open_mailbox(parsed.accounts[0])
+
+
 def test_repository_config_is_valid():
     parsed = config.parse_config(config.CONFIG_PATH.read_text(encoding="utf-8"))
 

@@ -59,7 +59,8 @@ accounts:
     imap:
       host: ${IMAP_HOST}
       username: ${IMAP_USER}
-      password: ${IMAP_PASSWORD}
+      # Only needed to log in, so scripts that never touch the mailbox run without it.
+      password: ${IMAP_PASSWORD:-}
 
   # Gmail (OAuth2 client of a Google Cloud project, refresh token per mailbox):
   # - id: gmail-example
