@@ -85,6 +85,31 @@ def ensure_email_columns():
         "processed_at": "DATETIME",
         "is_eval_holdout": "BOOLEAN",
         "is_training_data": "BOOLEAN NOT NULL DEFAULT 0",
+        "sender_name": "TEXT",
+        "recipients": "TEXT",
+        "attachment_names": "TEXT",
+        "direction": "TEXT",
+        "is_own_domain_sender": "BOOLEAN",
+        "is_reply": "BOOLEAN",
+        "is_forward": "BOOLEAN",
+        "status": "TEXT",
+        "priority": "TEXT",
+        "action": "TEXT",
+        "mail_type_1": "TEXT",
+        "mail_type_2": "TEXT",
+        "classification_reason": "TEXT",
+        "case_ref": "TEXT",
+        "true_status": "TEXT",
+        "true_priority": "TEXT",
+        "true_action": "TEXT",
+        "true_mail_type_1": "TEXT",
+        "true_mail_type_2": "TEXT",
+        "reviewed": "BOOLEAN",
+        "note": "TEXT",
+        "traits": "TEXT",
+        "dataset_key": "TEXT",
+        "dataset_split": "TEXT",
+        "difficulty": "TEXT",
     }
     existing_columns = {
         column["name"] for column in inspect(engine).get_columns("emails")
@@ -100,9 +125,10 @@ def ensure_email_columns():
             text("UPDATE emails SET account = :account WHERE account IS NULL"),
             {"account": primary_account().id},
         )
-        connection.execute(
-            text("CREATE INDEX IF NOT EXISTS ix_emails_account ON emails (account)")
-        )
+        for column_name in ("account", "case_ref", "dataset_key"):
+            connection.execute(text(
+                f"CREATE INDEX IF NOT EXISTS ix_emails_{column_name} ON emails ({column_name})"
+            ))
         connection.execute(
             text("UPDATE emails SET processed = 0 WHERE processed IS NULL")
         )

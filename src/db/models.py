@@ -24,6 +24,14 @@ class Email(Base):
 
     subject = Column(String)
     sender = Column(String)
+    sender_name = Column(String, nullable=True)
+    recipients = Column(Text, nullable=True)
+    attachment_names = Column(Text, nullable=True)
+    # INBOUND (external sender) or INTERNAL (sender in the account's own domain).
+    direction = Column(String, nullable=True)
+    is_own_domain_sender = Column(Boolean, nullable=True)
+    is_reply = Column(Boolean, nullable=True)
+    is_forward = Column(Boolean, nullable=True)
     date = Column(DateTime, default=_utcnow)
     read_at = Column(DateTime, nullable=True, index=True)
 
@@ -36,6 +44,17 @@ class Email(Base):
     classification_source = Column(String, nullable=True)
     confidence = Column(String, nullable=True)
     embedding = Column(Text, nullable=True)
+
+    # Predicted mail handling ("VORSCHLAG_*" in the labelled dataset).
+    status = Column(String, nullable=True)
+    priority = Column(String, nullable=True)
+    action = Column(String, nullable=True)
+    mail_type_1 = Column(String, nullable=True)
+    mail_type_2 = Column(String, nullable=True)
+    classification_reason = Column(Text, nullable=True)
+    # Business case the mail belongs to, e.g. a shipment or order reference.
+    case_ref = Column(String, nullable=True, index=True)
+
     order_id = Column(String, nullable=True)
     tracking_id = Column(String, nullable=True)
     entity_date = Column(String, nullable=True)
@@ -54,6 +73,21 @@ class Email(Base):
     processed_at = Column(DateTime, nullable=True, index=True)
 
     true_label = Column(String, nullable=True)
+    # Confirmed handling values, the counterparts of the predictions above.
+    true_status = Column(String, nullable=True)
+    true_priority = Column(String, nullable=True)
+    true_action = Column(String, nullable=True)
+    true_mail_type_1 = Column(String, nullable=True)
+    true_mail_type_2 = Column(String, nullable=True)
+    # A person checked the confirmed values ("GEPRUEFT").
+    reviewed = Column(Boolean, nullable=True)
+    note = Column(Text, nullable=True)
+    traits = Column(Text, nullable=True)
+
+    # Origin of imported labelled data: dataset row key, TRAIN/TEST split, difficulty.
+    dataset_key = Column(String, nullable=True, index=True)
+    dataset_split = Column(String, nullable=True)
+    difficulty = Column(String, nullable=True)
 
     # Set to the retrain run id once this correction has been used for fine-tuning.
     retrain_batch = Column(Integer, nullable=True, index=True)
