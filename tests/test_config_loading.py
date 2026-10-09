@@ -52,7 +52,9 @@ class FakeBlob:
         return self.name in self.objects
 
     def download_as_text(self, encoding=None):
-        return self.objects[self.name]
+        content = self.objects[self.name]
+        # Objects stored as bytes are decoded like GCS does.
+        return content.decode(encoding) if isinstance(content, bytes) else content
 
     def download_to_filename(self, filename):
         with open(filename, "w", encoding="utf-8") as file:
@@ -120,8 +122,13 @@ def test_service_uploads_the_bundled_config_when_gcs_has_none(bucket, monkeypatc
 
 @pytest.mark.parametrize(
     "broken",
-    ["folder_lists: [", BUNDLED.replace("folder_list: default", "folder_lists: default")],
-    ids=["yaml", "schema"],
+    [
+        "folder_lists: [",
+        BUNDLED.replace("folder_list: default", "folder_lists: default"),
+        # As saved by Windows PowerShell 5.1's Set-Content.
+        BUNDLED.replace("delivery", "schäden").encode("cp1252"),
+    ],
+    ids=["yaml", "schema", "encoding"],
 )
 def test_broken_gcs_config_at_startup_falls_back_to_the_bundled_one(
     bucket, monkeypatch, caplog, broken
@@ -270,6 +277,16 @@ def test_rejected_gcs_config_at_startup_falls_back_to_the_bundled_one(bucket, mo
     loaded = config.reload_config(check=lambda new: config.require_account_ids(new, {"primary"}))
 
     assert [account.id for account in loaded.accounts] == ["primary"]
+
+
+def test_bundled_fallback_is_checked_like_the_gcs_copy(bucket, monkeypatch):
+    monkeypatch.setenv("K_SERVICE", "smio")
+    bucket[config.CONFIG_GCS_OBJECT] = "folder_lists: ["
+    config.CONFIG_PATH.chmod(0o644)
+    config.CONFIG_PATH.write_text(RENAMED, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="primary have stored mails"):
+        config.reload_config(check=lambda new: config.require_account_ids(new, {"primary"}))
 
 
 def test_gcs_bucket_is_read_when_used(monkeypatch):

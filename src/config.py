@@ -216,8 +216,6 @@ def _gcs_config_text():
     Kept in memory: the bundled file is read-only in the image and stays the
     initial upload and the fallback.
     """
-    if not _reads_from_gcs():
-        return None
     text = gcs.download_text(CONFIG_GCS_OBJECT)
     if text is None:
         logger.info("No config in GCS at %s; uploading the bundled one", CONFIG_GCS_OBJECT)
@@ -225,21 +223,29 @@ def _gcs_config_text():
     return text
 
 
+def _parse_and_check(text, check):
+    config = parse_config(text)
+    if check is not None:
+        check(config)
+    return config
+
+
 def _load_config(startup, check):
-    text = _gcs_config_text()
-    try:
-        config = parse_config(text if text is not None else CONFIG_PATH.read_text(encoding="utf-8"))
-        if check is not None:
-            check(config)
-        return config
-    except (ValueError, yaml.YAMLError):
-        if text is None or not startup:
-            raise
-        # Nothing to keep yet: run on the bundled config rather than not at all.
-        logger.exception(
-            "Invalid SMIO config in GCS at %s; using the bundled %s", CONFIG_GCS_OBJECT, CONFIG_PATH
-        )
-        return parse_config(CONFIG_PATH.read_text(encoding="utf-8"))
+    if _reads_from_gcs():
+        try:
+            # Downloaded inside the try: a copy that is not UTF-8 fails here.
+            text = _gcs_config_text()
+            if text is not None:
+                return _parse_and_check(text, check)
+        except (ValueError, yaml.YAMLError):
+            if not startup:
+                raise
+            # Nothing to keep yet: run on the bundled config rather than not at all.
+            logger.exception(
+                "Invalid SMIO config in GCS at %s; using the bundled %s",
+                CONFIG_GCS_OBJECT, CONFIG_PATH,
+            )
+    return _parse_and_check(CONFIG_PATH.read_text(encoding="utf-8"), check)
 
 
 _config = None
@@ -251,7 +257,7 @@ def reload_config(check=None):
 
     check(config) may raise ValueError to reject the new config. A broken or
     rejected config keeps the previous one; at startup a broken or rejected
-    GCS copy falls back to the bundled file.
+    GCS copy falls back to the bundled file, which must pass the check too.
     """
     global _config
     with _config_lock:
