@@ -87,7 +87,7 @@ def test_load_data_only_uses_the_folder_lists_labels(db, script):
     db.commit()
     ids = script.label_ids("rhein-cargo")
 
-    texts, labels, groups = script.load_data(db, "rhein-cargo", ids)
+    texts, labels, groups, _ = script.load_data(db, "rhein-cargo", ids)
 
     assert texts == ["a", "b"]
     assert labels == [ids["dokumente"], ids["other"]]
@@ -227,6 +227,25 @@ def test_eval_holdout_is_never_trained_on_and_scores_the_final_model(training, c
     output = capsys.readouterr().out
     assert "20 labelled mails for training" in output
     assert "Warning: only 20 mails to train on" in output
+
+
+def test_rerun_on_changed_data_does_not_reuse_the_old_trials(training):
+    _add_mails(training.engine, 20)
+    training.main()
+    _add_mails(training.engine, 2)
+    # Worse than the first run, whose trial has predictions for only 20 mails.
+    training.score = 0.5
+
+    training.main()
+
+    assert len(training.final_trainers[-1].train_dataset.texts) == 22
+
+
+def test_report_rejects_a_trial_run_on_other_data(script):
+    trial = SimpleNamespace(number=3, value=0.9, user_attrs={"out_of_fold_predictions": [0, 1]})
+
+    with pytest.raises(ValueError, match="other data"):
+        script.report(trial, [0, 1, 1], script.label_ids("default"), "default")
 
 
 def test_main_migrates_a_database_from_before_folder_lists(training):

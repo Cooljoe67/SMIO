@@ -20,6 +20,7 @@ Usage:
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import shutil
@@ -148,7 +149,7 @@ def label_ids(folder_list):
 
 
 def load_data(db, folder_list, label2id, holdout=False):
-    """Texts, label ids and case groups of the mails labelled for the folder list.
+    """Texts, label ids, case groups and ids of the mails labelled for the folder list.
 
     Without holdout these are the training mails; with it the permanent eval
     holdout, which is never trained on.
@@ -166,7 +167,22 @@ def load_data(db, folder_list, label2id, holdout=False):
     labels = [label2id[email.true_label] for email in emails]
     # Mails without a case are their own group.
     groups = [email.case_ref or f"mail-{email.id}" for email in emails]
-    return texts, labels, groups
+    return texts, labels, groups, [email.id for email in emails]
+
+
+def data_fingerprint(ids, labels, label2id, num_folds):
+    """Hash of the training mails, their labels and the folds.
+
+    Part of the study name: a persisted trial's out-of-fold predictions belong
+    to the mails it was run on, so trials of other data must not be reused.
+    """
+    payload = json.dumps([
+        sorted(zip(ids, labels)),
+        sorted(label2id.items()),
+        num_folds,
+        RANDOM_STATE,
+    ])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
 
 
 def make_folds(labels, groups, num_folds):
@@ -301,6 +317,11 @@ def objective(trial, data, tokenizer, class_weights, options):
 def report(best_trial, labels, label2id, folder_list):
     names = sorted(label2id, key=label2id.get)
     predictions = best_trial.user_attrs["out_of_fold_predictions"]
+    if len(predictions) != len(labels):
+        raise ValueError(
+            f"Trial {best_trial.number} has {len(predictions)} out-of-fold predictions "
+            f"for {len(labels)} mails; it was run on other data"
+        )
     print("\n=== BEST TRIAL ===")
     print("Mean fold F1:", best_trial.value, "+/-", best_trial.user_attrs["std_fold_f1"])
     print("Out-of-fold scores:", best_trial.user_attrs["out_of_fold_scores"])
@@ -424,8 +445,8 @@ def main():
     )
     db = SessionLocal()
     try:
-        texts, labels, groups = load_data(db, options.folder_list, label2id)
-        holdout_texts, holdout_labels, _ = load_data(
+        texts, labels, groups, ids = load_data(db, options.folder_list, label2id)
+        holdout_texts, holdout_labels, _, _ = load_data(
             db, options.folder_list, label2id, holdout=True
         )
     finally:
@@ -450,12 +471,13 @@ def main():
     class_weights = np.full(len(label2id), present_weights.max())
     class_weights[present] = present_weights
 
-    # One persistent study per folder list, metric, fold count and base model.
+    # One persistent study per folder list, metric, fold count, base model and data.
+    fingerprint = data_fingerprint(ids, labels, label2id, options.folds)
     study = optuna.create_study(
         direction="maximize",
         study_name=(
             f"distilbert_{options.folder_list}_{options.metric}_cv{options.folds}_"
-            f"{options.base_model.replace('/', '-')}"
+            f"{options.base_model.replace('/', '-')}_{fingerprint}"
         ),
         storage=STUDY_STORAGE,
         load_if_exists=True,
