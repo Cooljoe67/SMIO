@@ -56,7 +56,8 @@ def db():
 
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine)()
+    # Like SessionLocal in production, so a missing flush shows up in tests.
+    session = sessionmaker(bind=engine, autoflush=False)()
     try:
         yield session
     finally:

@@ -153,6 +153,9 @@ def process_unprocessed_emails(db: Session, account):
         .filter(
             Email.account == account.id,
             Email.is_training_data.is_(False),
+            # Mails the user filed or deleted before processing are not sorted again.
+            Email.folder == inbox_folder(account),
+            Email.removed_at.is_(None),
             or_(Email.processed <= 0, Email.processed.is_(None)),
         )
         .all()

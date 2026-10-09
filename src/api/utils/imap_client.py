@@ -96,8 +96,14 @@ def move_email_to_classification_folder(mailbox, email, account):
     if destination is None:
         return None
     source_folder = email.folder or inbox_folder(account)
+    if source_folder == destination:
+        # Already there; a MOVE within one folder would only renumber it.
+        return None
     if _verify_uid(mailbox, email, source_folder) is None:
-        raise ValueError(f"Email {email.id} is no longer in {source_folder}")
+        # Moved or deleted since the sync; the next sync records which. Raising
+        # would leave it unprocessed and fail again on every run.
+        logger.warning("Email %s is no longer in %s; not moving it", email.id, source_folder)
+        return None
 
     if not mailbox.folder.exists(destination):
         mailbox.folder.create(destination)
@@ -160,11 +166,15 @@ def _find_email(db, account, message_id, mail_fingerprint, subject, date):
     emails = db.query(Email).filter(Email.account == account.id)
     if message_id:
         for email_obj in emails.filter(Email.message_id == message_id).order_by(Email.id):
-            # Some senders reuse Message-IDs; a different subject *and* date is another mail.
-            if (
-                email_obj.fingerprint in (None, mail_fingerprint)
-                or email_obj.subject == subject
-                or normalized_date(email_obj.date) == normalized_date(date)
+            # Some senders reuse Message-IDs; a different subject or a different
+            # Date (which a move never changes) is another mail.
+            if email_obj.fingerprint in (None, mail_fingerprint) or (
+                email_obj.subject == subject
+                and (
+                    email_obj.date is None
+                    or date is None
+                    or normalized_date(email_obj.date) == normalized_date(date)
+                )
             ):
                 return email_obj
     return emails.filter(Email.fingerprint == mail_fingerprint).first()
@@ -274,6 +284,16 @@ def _sync_message(
             email_obj.direction = "OUTBOUND"
             email_obj.processed = 1
             email_obj.processing_batch = 0
+    elif (
+        email_obj.direction == "OUTBOUND"
+        and folder_name == inbox_folder(account)
+        and email_obj.classification is None
+    ):
+        # Sent to oneself, and the Sent copy was synced in an earlier run: the
+        # inbox copy is received mail and is processed like any other.
+        email_obj.direction = None
+        email_obj.processed = 0
+        email_obj.processing_batch = None
     email_obj.message_id = message_id
     email_obj.fingerprint = mail_fingerprint
     in_reply_to = _message_ids(_header(msg, "In-Reply-To"))
@@ -300,7 +320,16 @@ def _sync_message(
 
     folder_classification = classification_for_folder(folder_name, account)
     previous_folder_classification = classification_for_folder(previous_folder or "", account)
-    if (
+    if not new_email and folder_classification and int(email_obj.processed or 0) <= 0:
+        # Filed by the user before SMIO processed it: the folder is the label.
+        # No processing batch, so undo leaves it where the user put it.
+        email_obj.processed = 1
+        email_obj.processed_at = sync_timestamp
+        email_obj.classification = folder_classification
+        email_obj.true_label = folder_classification
+        email_obj.classification_source = "imap_folder"
+        email_obj.folder_list = account.folder_list
+    elif (
         not new_email
         and folder_classification
         and previous_classification
@@ -393,6 +422,9 @@ def _sync_folders(account, allow_new):
                     if len(new_emails) == new_count:
                         changed += 1
             sent_result = _sync_sent(db, mailbox, account, allow_new, seen_ids)
+            # The stale check runs in SQL: write this sync's last_seen_at and
+            # folders first (autoflush is off), or every mail seen counts as gone.
+            db.flush()
             stale_emails = db.query(Email).filter(
                 Email.account == account.id,
                 Email.folder.in_(active_folders),
