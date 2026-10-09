@@ -6,8 +6,13 @@ inflated by near-identical mails. The best trial's out-of-fold predictions give
 the confusion matrix; the final model is trained on all labelled mails and saved
 with its label names to the folder list's model location.
 
-The cross-validated score of the best trial is slightly optimistic, because the
-same folds were used to choose the learning rate.
+The permanent eval holdout (is_eval_holdout) is left out of all of this; it only
+scores the final model, which gives the honest test result. The cross-validated
+score of the best trial is slightly optimistic, because the same folds were used
+to choose the learning rate.
+
+--publish archives the live model to <prefix>_history/<time> before uploading
+the new one; for the default list, RESTORE MODEL can bring it back.
 
 Usage:
     python -m scripts.train_distilbert_optuna --folder-list rhein-cargo [--publish]
@@ -15,9 +20,13 @@ Usage:
 
 import argparse
 import csv
+import json
 import os
 import shutil
+import tempfile
 from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
 
 import numpy as np
 import optuna
@@ -60,6 +69,10 @@ WARMUP_RATIO = 0.15
 N_TRIALS = 5
 TARGET_F1 = 0.89
 RANDOM_STATE = 42
+# Below this many training mails the model and its scores are unreliable.
+MIN_TRAINING_MAILS = 100
+# Archive names as in src/ai/retrain.py, so RESTORE MODEL can parse and prune them.
+ARCHIVE_TIME_FORMAT = "%Y%m%d_%H%M%S_%f"
 
 
 # ---------- Dataset ----------
@@ -134,11 +147,16 @@ def label_ids(folder_list):
     return {label: index for index, label in enumerate(labels)}
 
 
-def load_data(db, folder_list, label2id):
-    """Texts, label ids and case groups of all mails labelled for the folder list."""
+def load_data(db, folder_list, label2id, holdout=False):
+    """Texts, label ids and case groups of the mails labelled for the folder list.
+
+    Without holdout these are the training mails; with it the permanent eval
+    holdout, which is never trained on.
+    """
     emails = db.query(Email).filter(
         Email.folder_list == folder_list,
         Email.true_label.isnot(None),
+        Email.is_eval_holdout.is_(holdout),
     ).order_by(Email.id).all()
     unknown = Counter(email.true_label for email in emails if email.true_label not in label2id)
     if unknown:
@@ -304,6 +322,23 @@ def report(best_trial, labels, label2id, folder_list):
             writer.writerow([name, *row])
 
 
+def evaluate_holdout(trainer, texts, labels, tokenizer, label2id, folder_list):
+    """Score the final model on the eval holdout: the honest test result."""
+    names = sorted(label2id, key=label2id.get)
+    output = trainer.predict(EmailDataset(texts, labels, tokenizer, MAX_LENGTH))
+    predictions = np.argmax(output.predictions, axis=-1)
+    result = {key: float(value) for key, value in scores(labels, predictions).items()}
+    print(f"\n=== EVAL HOLDOUT ({len(labels)} mails, never trained on) ===")
+    print("Scores:", result)
+    print(classification_report(
+        labels, predictions, labels=list(range(len(names))), target_names=names, zero_division=0
+    ))
+
+    path = os.path.join(BASE_OUTPUT_DIR, folder_list, "holdout_scores.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"mails": len(labels), **result}, f, indent=2)
+
+
 def write_trials(study, folder_list):
     path = os.path.join(BASE_OUTPUT_DIR, folder_list, "optuna_results.csv")
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -324,6 +359,33 @@ def write_trials(study, folder_list):
                 t.params.get("learning_rate"),
                 t.user_attrs.get("best_epochs"),
             ])
+
+
+# ---------- Publishing ----------
+
+def archive_live_model(gcs_prefix):
+    """Copy the live model to <prefix>_history/<time>; None if nothing is live yet."""
+    archive_prefix = (
+        f"{gcs_prefix.rstrip('/')}_history/"
+        f"{datetime.now(timezone.utc).strftime(ARCHIVE_TIME_FORMAT)}"
+    )
+    with tempfile.TemporaryDirectory(prefix="smio-model-archive-") as temporary_dir:
+        live_model = Path(temporary_dir) / "live-model"
+        if not gcs.download_directory(gcs_prefix, live_model):
+            return None
+        if not gcs.upload_directory(live_model, archive_prefix):
+            raise RuntimeError(f"Could not archive the live model to {archive_prefix}")
+    return archive_prefix
+
+
+def publish(deploy_dir, gcs_prefix):
+    """Replace the live model, archiving it first: the upload overwrites it file by file."""
+    archive_prefix = archive_live_model(gcs_prefix)
+    if archive_prefix:
+        print(f"Archived the live model to GCS prefix {archive_prefix}.")
+    if not gcs.upload_directory(deploy_dir, gcs_prefix):
+        raise RuntimeError("GCS is not configured (GCS_BUCKET); model not published")
+    print(f"Published to GCS prefix {gcs_prefix}; send RELOAD MODEL to use it.")
 
 
 # ---------- Main ----------
@@ -363,13 +425,22 @@ def main():
     db = SessionLocal()
     try:
         texts, labels, groups = load_data(db, options.folder_list, label2id)
+        holdout_texts, holdout_labels, _ = load_data(
+            db, options.folder_list, label2id, holdout=True
+        )
     finally:
         db.close()
     id2label = {index: label for label, index in label2id.items()}
     print(
-        f"{len(texts)} labelled mails in {len(set(groups))} case groups:",
+        f"{len(texts)} labelled mails for training in {len(set(groups))} case groups:",
         dict(Counter(id2label[label] for label in labels)),
     )
+    print(f"{len(holdout_texts)} eval holdout mails are kept out of training.")
+    if len(texts) < MIN_TRAINING_MAILS:
+        print(
+            f"Warning: only {len(texts)} mails to train on (fewer than {MIN_TRAINING_MAILS}); "
+            "the model and its scores will be unreliable."
+        )
     folds = make_folds(labels, groups, options.folds)
     labels_arr = np.array(labels)
 
@@ -424,12 +495,17 @@ def main():
     deploy_dir.mkdir(parents=True, exist_ok=True)
     final_model.save_pretrained(deploy_dir)
     tokenizer.save_pretrained(deploy_dir)
-    print(f"\nModel ({num_epochs} epochs) saved to: {deploy_dir}")
+    print(f"\nModel ({num_epochs} epochs, {len(texts)} mails) saved to: {deploy_dir}")
+
+    if holdout_texts:
+        evaluate_holdout(
+            final_trainer, holdout_texts, holdout_labels, tokenizer, label2id, options.folder_list
+        )
+    else:
+        print("No eval holdout for this folder list; only the cross-validated scores above exist.")
 
     if options.publish:
-        if not gcs.upload_directory(deploy_dir, gcs_prefix):
-            raise RuntimeError("GCS is not configured (GCS_BUCKET); model not published")
-        print(f"Published to GCS prefix {gcs_prefix}; send RELOAD MODEL to use it.")
+        publish(deploy_dir, gcs_prefix)
     else:
         print(
             "Not published: the service loads models from GCS when GCS_BUCKET is set, "

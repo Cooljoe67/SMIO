@@ -1,6 +1,8 @@
 import importlib
+import json
 import sys
 import types
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -193,6 +195,40 @@ def training(script, monkeypatch, tmp_path):
     engine.dispose()
 
 
+def _add_mails(engine, count, holdout=False):
+    session = sessionmaker(bind=engine)()
+    session.add_all(
+        Email(
+            folder_list="default",
+            true_label=DEFAULT_LABELS[index % len(DEFAULT_LABELS)],
+            text=f"{'holdout' if holdout else 'training'} mail {index}",
+            is_eval_holdout=holdout,
+        )
+        for index in range(count)
+    )
+    session.commit()
+    session.close()
+
+
+def test_eval_holdout_is_never_trained_on_and_scores_the_final_model(training, capsys):
+    _add_mails(training.engine, 20)
+    _add_mails(training.engine, 5, holdout=True)
+
+    training.main()
+
+    (cv_texts,) = training.cv_texts
+    (final,) = training.final_trainers
+    assert len(cv_texts) == len(final.train_dataset.texts) == 20
+    assert not any(text.startswith("holdout") for text in cv_texts + final.train_dataset.texts)
+    holdout_scores = json.loads(
+        (training.output_dir / "default" / "holdout_scores.json").read_text()
+    )
+    assert holdout_scores["mails"] == 5 and holdout_scores["macro_f1"] == 1.0
+    output = capsys.readouterr().out
+    assert "20 labelled mails for training" in output
+    assert "Warning: only 20 mails to train on" in output
+
+
 def test_main_migrates_a_database_from_before_folder_lists(training):
     with training.engine.begin() as connection:
         for column in ("account", "folder_list"):
@@ -221,3 +257,71 @@ def test_publish_without_gcs_fails_before_loading_data(training, monkeypatch, sc
 
     with pytest.raises(SystemExit, match="GCS_BUCKET"):
         training.main("--publish")
+
+
+class FakeBucket:
+    """GCS objects in a dict, with the directory calls of src.storage.gcs."""
+
+    def __init__(self, objects=None, archive_fails=False):
+        self.objects = dict(objects or {})
+        self.archive_fails = archive_fails
+
+    def download_directory(self, prefix, destination):
+        prefix = prefix.rstrip("/") + "/"
+        names = [name for name in self.objects if name.startswith(prefix)]
+        for name in names:
+            path = Path(destination, name[len(prefix):])
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(self.objects[name])
+        return bool(names)
+
+    def upload_directory(self, source, prefix):
+        if self.archive_fails and "_history/" in prefix:
+            return False
+        for path in Path(source).rglob("*"):
+            if path.is_file():
+                relative_path = path.relative_to(source).as_posix()
+                self.objects[f"{prefix.rstrip('/')}/{relative_path}"] = path.read_bytes()
+        return True
+
+
+def _publish(script, monkeypatch, tmp_path, bucket):
+    monkeypatch.setattr(script.gcs, "download_directory", bucket.download_directory)
+    monkeypatch.setattr(script.gcs, "upload_directory", bucket.upload_directory)
+    new_model = tmp_path / "new-model"
+    new_model.mkdir()
+    (new_model / "model.safetensors").write_bytes(b"new")
+    script.publish(new_model, "models/distilbert_deployed")
+
+
+def test_publish_archives_the_live_model_before_replacing_it(script, monkeypatch, tmp_path):
+    bucket = FakeBucket({"models/distilbert_deployed/model.safetensors": b"live"})
+
+    _publish(script, monkeypatch, tmp_path, bucket)
+
+    assert bucket.objects["models/distilbert_deployed/model.safetensors"] == b"new"
+    (archived,) = [name for name in bucket.objects if "_history/" in name]
+    assert bucket.objects[archived] == b"live"
+    # The archive name is the one RESTORE MODEL parses (src/ai/retrain.py).
+    prefix, archive_name, _ = archived.rsplit("/", 2)
+    assert prefix == "models/distilbert_deployed_history"
+    datetime.strptime(archive_name, "%Y%m%d_%H%M%S_%f")
+
+
+def test_publish_is_aborted_when_the_live_model_cannot_be_archived(script, monkeypatch, tmp_path):
+    bucket = FakeBucket(
+        {"models/distilbert_deployed/model.safetensors": b"live"}, archive_fails=True
+    )
+
+    with pytest.raises(RuntimeError, match="archive"):
+        _publish(script, monkeypatch, tmp_path, bucket)
+
+    assert bucket.objects == {"models/distilbert_deployed/model.safetensors": b"live"}
+
+
+def test_first_publish_has_nothing_to_archive(script, monkeypatch, tmp_path):
+    bucket = FakeBucket()
+
+    _publish(script, monkeypatch, tmp_path, bucket)
+
+    assert bucket.objects == {"models/distilbert_deployed/model.safetensors": b"new"}
