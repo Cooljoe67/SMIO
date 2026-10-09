@@ -52,7 +52,7 @@ folder_lists:
 
 # An account id identifies its stored mails: never change it, or the inbox is
 # imported again as new mail. A config that drops the id of stored mails is
-# rejected (the previous one stays in use).
+# never used.
 accounts:
   - id: primary
     provider: imap            # imap | gmail | exchange (gmail and exchange: not yet supported)

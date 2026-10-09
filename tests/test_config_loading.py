@@ -233,6 +233,28 @@ def test_schema_migration_reads_the_config_only_for_unassigned_mails(tmp_path, m
     engine.dispose()
 
 
+def test_migration_can_be_the_first_config_load(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{(tmp_path / 'smio.db').as_posix()}")
+    with engine.begin() as connection:
+        # A database from before multi-account support.
+        connection.execute(text(
+            "CREATE TABLE emails (id INTEGER PRIMARY KEY, processed INTEGER, classification TEXT, "
+            "true_label TEXT, uid TEXT, is_training_data BOOLEAN)"
+        ))
+        connection.execute(text("INSERT INTO emails (processed, uid) VALUES (1, '5')"))
+    monkeypatch.setattr(database, "engine", engine)
+    monkeypatch.setattr(database, "persist_database", lambda: False)
+    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "smio.yaml")
+    config.CONFIG_PATH.write_text(BUNDLED, encoding="utf-8")
+    monkeypatch.setattr(config, "_config", None)
+
+    database.ensure_email_columns()
+
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT account FROM emails")).scalar() == "primary"
+    engine.dispose()
+
+
 RENAMED = BUNDLED.replace("id: primary", "id: marcus")
 
 
@@ -253,6 +275,18 @@ def test_stored_account_ids_are_the_distinct_mailbox_accounts(tmp_path, monkeypa
     engine.dispose()
 
 
+@pytest.mark.parametrize("schema", [None, "CREATE TABLE emails (id INTEGER PRIMARY KEY)"])
+def test_no_account_ids_are_stored_before_the_migration(tmp_path, monkeypatch, schema):
+    engine = create_engine(f"sqlite:///{(tmp_path / 'new.db').as_posix()}")
+    if schema:
+        with engine.begin() as connection:
+            connection.execute(text(schema))
+    monkeypatch.setattr(database, "engine", engine)
+
+    assert database.stored_account_ids() == set()
+    engine.dispose()
+
+
 def test_workflow_keeps_the_config_when_a_stored_account_id_disappears(tmp_path, monkeypatch, caplog):
     engine = _database_with_accounts(tmp_path, "primary", None)
     monkeypatch.setattr(database, "engine", engine)
@@ -267,6 +301,30 @@ def test_workflow_keeps_the_config_when_a_stored_account_id_disappears(tmp_path,
 
     assert result is previous
     assert "primary have stored mails but are not configured" in caplog.text
+    engine.dispose()
+
+
+def test_first_load_outside_the_workflow_rejects_a_renamed_gcs_account(tmp_path, bucket, monkeypatch):
+    # A request before the first workflow run after a cold start; later
+    # reloads would keep whatever this load accepts.
+    engine = _database_with_accounts(tmp_path, "primary")
+    monkeypatch.setattr(database, "engine", engine)
+    monkeypatch.setenv("K_SERVICE", "smio")
+    bucket[config.CONFIG_GCS_OBJECT] = RENAMED
+
+    assert config.resolve_account().id == "primary"
+    engine.dispose()
+
+
+def test_first_load_refuses_a_local_config_without_a_stored_account(tmp_path, monkeypatch):
+    engine = _database_with_accounts(tmp_path, "primary")
+    monkeypatch.setattr(database, "engine", engine)
+    monkeypatch.setattr(config, "_config", None)
+    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "renamed.yaml")
+    config.CONFIG_PATH.write_text(RENAMED, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="primary have stored mails"):
+        config.get_config()
     engine.dispose()
 
 

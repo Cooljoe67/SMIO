@@ -272,7 +272,9 @@ def reload_config(check=None):
 
 
 def get_config():
-    return _config or reload_config()
+    # Checked like the workflow's reloads: a renamed id accepted here would be
+    # kept by every later reload that rejects it.
+    return _config or reload_config(check=require_stored_account_ids)
 
 
 def require_account_ids(config, account_ids):
@@ -287,6 +289,14 @@ def require_account_ids(config, account_ids):
             f"Accounts {', '.join(sorted(missing))} have stored mails but are not "
             "configured; account ids must never change"
         )
+
+
+def require_stored_account_ids(config):
+    """require_account_ids for the mails in the database; a reload check."""
+    # Imported here: src.db.database imports this module.
+    from src.db.database import stored_account_ids
+
+    require_account_ids(config, stored_account_ids())
 
 
 def primary_account():

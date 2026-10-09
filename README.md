@@ -394,8 +394,10 @@ Keep it out of `.env` on machines that run SMIO locally against their own `smio.
 ### Mail accounts and credentials
 
 Each account has an `id` that its stored mails are keyed by. Never change it: a
-renamed account would import its inbox again as new mail. The service rejects a
-config that drops the id of stored mails and keeps the previous one.
+renamed account would import its inbox again as new mail. SMIO never uses a config
+that drops the id of stored mails: a running service keeps its previous config, a
+starting one falls back to the bundled file, and scripts and local runs stop with
+an error.
 
 Credentials are never written into the config. Each one is either the name of a
 Google Secret Manager secret, read by SMIO when the account logs in, or a `${VAR}`

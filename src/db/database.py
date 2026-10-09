@@ -189,7 +189,14 @@ def ensure_email_columns():
 
 
 def stored_account_ids():
-    """The accounts that stored mails belong to."""
+    """The accounts that stored mails belong to; none before the migration."""
+    # Every first config load asks, and scripts may load it before creating
+    # or migrating the tables.
+    inspector = inspect(engine)
+    if not inspector.has_table("emails") or "account" not in {
+        column["name"] for column in inspector.get_columns("emails")
+    }:
+        return set()
     with engine.connect() as connection:
         return set(connection.execute(
             text("SELECT DISTINCT account FROM emails WHERE account IS NOT NULL")
