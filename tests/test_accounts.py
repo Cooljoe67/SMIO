@@ -229,7 +229,7 @@ def test_pending_commands_are_reported_to_their_own_account(
 def test_retrain_is_refused_for_other_folder_lists(db, accounts):
     _, second = accounts
 
-    result = command_processor._run_command(db, "retrain", second)
+    result = command_processor._run_command(db, "retrain", second, is_primary=True)
 
     assert "small" in result["error"]
     assert command_processor._command_failed(result)

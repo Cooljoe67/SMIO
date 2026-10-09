@@ -50,6 +50,8 @@ _COMMAND_PATTERN = re.compile(
     r"^\s*(?:smio\s*:\s*)?(undo(?:\s+\d+)?|retrain|reload\s+model|restore\s+model|summary|logs\s+\d+)(?=$|\s)",
     re.IGNORECASE,
 )
+# These act on the shared model or the whole service's logs, not on one mailbox.
+_PRIMARY_ONLY_COMMANDS = {"retrain", "reload model", "restore model"}
 
 
 def _normalize_command(subject, body):
@@ -70,7 +72,7 @@ def _normalize_command(subject, body):
     return re.sub(r"\s+", " ", match.group(1)).casefold() if match else None
 
 
-def _run_command(db, command, account):
+def _run_command(db, command, account, is_primary=False):
     if command == "undo" or command.startswith("undo "):
         parts = command.split(maxsplit=1)
         count = int(parts[1]) if len(parts) > 1 else 1
@@ -78,6 +80,12 @@ def _run_command(db, command, account):
             return {"command": command, "error": f"UNDO accepts a batch count from 1 to {MAX_UNDO_BATCHES}."}
         batch_ids, restored, errors = undo_processing_batches(db, account, count)
         return {"command": command, "batch_ids": batch_ids, "restored": len(restored), "errors": errors}
+
+    if (command in _PRIMARY_ONLY_COMMANDS or command.startswith("logs ")) and not is_primary:
+        return {
+            "command": command,
+            "error": f"{command.upper()} is not permitted for this account; only the primary account may use it.",
+        }
 
     if command in {"retrain", "restore model"} and account.folder_list != classifier.DEFAULT_FOLDER_LIST:
         return {
@@ -121,7 +129,7 @@ def _run_command(db, command, account):
         return {"command": command, "sent": sent, "log_lines": actual_line_count}
 
     if command == "summary":
-        summary = build_daily_summary(db, persist=False)
+        summary = build_daily_summary(db, persist=False, account=account)
         sent = append_summary_to_inbox(
             summary["message"],
             html_body=summary.get("html_message"),
@@ -345,10 +353,10 @@ def process_instruction_mails(account, is_primary=False):
                     continue
 
                 try:
-                    result = _run_command(db, command, account)
+                    result = _run_command(db, command, account, is_primary)
                     executed.append(result)
                     if _command_failed(result):
-                        reason = "The command returned an unsuccessful result."
+                        reason = result.get("error") or "The command returned an unsuccessful result."
                         errors.append({
                             "command": command,
                             "error": reason,
