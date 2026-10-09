@@ -393,6 +393,9 @@ def _sync_folders(account, allow_new):
                     if len(new_emails) == new_count:
                         changed += 1
             sent_result = _sync_sent(db, mailbox, account, allow_new, seen_ids)
+            # The stale check runs in SQL: write this sync's last_seen_at and
+            # folders first (autoflush is off), or every mail seen counts as gone.
+            db.flush()
             stale_emails = db.query(Email).filter(
                 Email.account == account.id,
                 Email.folder.in_(active_folders),

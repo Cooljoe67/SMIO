@@ -169,6 +169,33 @@ def test_copy_in_inbox_and_folder_keeps_the_folder(db, server):
     assert email.removed_at is None
 
 
+def test_sync_without_new_mail_marks_only_vanished_mails_removed(db, server):
+    mailbox = server(INBOX=[_message("1"), _message("2", message_id="<b@test>")])
+    assert len(_sync()) == 2
+    mailbox.folders["INBOX"].pop()
+
+    assert _sync() == []
+
+    kept, gone = db.query(Email).order_by(Email.id).all()
+    assert (kept.removed_at, kept.removal_reason) == (None, None)
+    assert gone.removed_at is not None and gone.removal_reason == "external"
+
+
+def test_mail_wrongly_marked_external_is_restored_when_seen_again(db, server):
+    server(**{"INBOX": [], "INBOX/tech": [_message("1")]})
+    db.add(Email(
+        account="primary", uid="1", folder="INBOX/tech", message_id="<a@test>",
+        subject="Lieferung", date=SENT, classification="tech", processed=1, processing_batch=1,
+        removed_at=datetime(2026, 10, 8), removal_reason="external", last_seen_at=datetime(2026, 10, 8),
+    ))
+    db.commit()
+
+    _sync()
+
+    email = db.query(Email).one()
+    assert (email.removed_at, email.removal_reason) == (None, None)
+
+
 def test_reused_message_id_with_other_content_is_a_separate_mail(db, server):
     server(INBOX=[
         _message("1", message_id="<same@test>"),
