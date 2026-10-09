@@ -226,6 +226,52 @@ def test_schema_migration_reads_the_config_only_for_unassigned_mails(tmp_path, m
     engine.dispose()
 
 
+RENAMED = BUNDLED.replace("id: primary", "id: marcus")
+
+
+def _database_with_accounts(tmp_path, *accounts):
+    engine = create_engine(f"sqlite:///{(tmp_path / 'accounts.db').as_posix()}")
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE emails (id INTEGER PRIMARY KEY, account TEXT)"))
+        for account in accounts:
+            connection.execute(text("INSERT INTO emails (account) VALUES (:account)"), {"account": account})
+    return engine
+
+
+def test_stored_account_ids_are_the_distinct_mailbox_accounts(tmp_path, monkeypatch):
+    engine = _database_with_accounts(tmp_path, "primary", "second", "primary", None)
+    monkeypatch.setattr(database, "engine", engine)
+
+    assert database.stored_account_ids() == {"primary", "second"}
+    engine.dispose()
+
+
+def test_workflow_keeps_the_config_when_a_stored_account_id_disappears(tmp_path, monkeypatch, caplog):
+    engine = _database_with_accounts(tmp_path, "primary", None)
+    monkeypatch.setattr(database, "engine", engine)
+    monkeypatch.setattr(workflows, "persist_database", lambda: False)
+    previous = config.parse_config(BUNDLED)
+    monkeypatch.setattr(config, "_config", previous)
+    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "renamed.yaml")
+    config.CONFIG_PATH.write_text(RENAMED, encoding="utf-8")
+
+    with caplog.at_level(logging.ERROR, logger="src.config"):
+        result = workflows._run_exclusively("test", lambda: config.get_config())
+
+    assert result is previous
+    assert "primary have stored mails but are not configured" in caplog.text
+    engine.dispose()
+
+
+def test_rejected_gcs_config_at_startup_falls_back_to_the_bundled_one(bucket, monkeypatch):
+    monkeypatch.setenv("K_SERVICE", "smio")
+    bucket[config.CONFIG_GCS_OBJECT] = RENAMED
+
+    loaded = config.reload_config(check=lambda new: config.require_account_ids(new, {"primary"}))
+
+    assert [account.id for account in loaded.accounts] == ["primary"]
+
+
 def test_gcs_bucket_is_read_when_used(monkeypatch):
     monkeypatch.setenv("GCS_BUCKET", "smio-test")
     assert gcs.enabled()

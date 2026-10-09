@@ -186,7 +186,7 @@ def test_failing_account_does_not_stop_the_others(accounts, monkeypatch):
         return {"processed": 1, "primary": is_primary}
 
     monkeypatch.setattr(workflows, "_process_account", process)
-    monkeypatch.setattr(workflows, "reload_config", lambda: None)
+    monkeypatch.setattr(workflows, "reload_config", lambda **kwargs: None)
     monkeypatch.setattr(workflows, "persist_database", lambda: False)
 
     assert workflows.run_five_minute_workflow() == {

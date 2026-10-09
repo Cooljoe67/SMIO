@@ -188,6 +188,14 @@ def ensure_email_columns():
     persist_database()
 
 
+def stored_account_ids():
+    """The accounts that stored mails belong to."""
+    with engine.connect() as connection:
+        return set(connection.execute(
+            text("SELECT DISTINCT account FROM emails WHERE account IS NOT NULL")
+        ).scalars())
+
+
 def backfill_fingerprints():
     """Give stored mailbox mails their fingerprint; safe to repeat."""
     from src.api.utils.mail_identity import email_fingerprint

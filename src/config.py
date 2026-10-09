@@ -198,10 +198,13 @@ def _gcs_config_text():
     return text
 
 
-def _load_config(startup):
+def _load_config(startup, check):
     text = _gcs_config_text()
     try:
-        return parse_config(text if text is not None else CONFIG_PATH.read_text(encoding="utf-8"))
+        config = parse_config(text if text is not None else CONFIG_PATH.read_text(encoding="utf-8"))
+        if check is not None:
+            check(config)
+        return config
     except (ValueError, yaml.YAMLError):
         if text is None or not startup:
             raise
@@ -216,16 +219,17 @@ _config = None
 _config_lock = Lock()
 
 
-def reload_config():
+def reload_config(check=None):
     """Re-read the configuration and return it.
 
-    A broken config keeps the previous one; at startup a broken GCS copy falls
-    back to the bundled file.
+    check(config) may raise ValueError to reject the new config. A broken or
+    rejected config keeps the previous one; at startup a broken or rejected
+    GCS copy falls back to the bundled file.
     """
     global _config
     with _config_lock:
         try:
-            _config = _load_config(startup=_config is None)
+            _config = _load_config(startup=_config is None, check=check)
         except Exception:
             if _config is None:
                 raise
@@ -236,6 +240,20 @@ def reload_config():
 
 def get_config():
     return _config or reload_config()
+
+
+def require_account_ids(config, account_ids):
+    """Reject a config without all of these account ids; a reload check.
+
+    Stored mails are identified by their account id: a renamed id would import
+    that inbox again as new mail and orphan the stored rows.
+    """
+    missing = set(account_ids) - {account.id for account in config.accounts}
+    if missing:
+        raise ValueError(
+            f"Accounts {', '.join(sorted(missing))} have stored mails but are not "
+            "configured; account ids must never change"
+        )
 
 
 def primary_account():
