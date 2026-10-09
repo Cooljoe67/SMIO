@@ -43,8 +43,8 @@ from transformers.modeling_outputs import SequenceClassifierOutput
 from src.ai.classifier import DEFAULT_FOLDER_LIST, model_location
 from src.ai.labels import LABEL2ID as DEFAULT_LABEL2ID
 from src.config import get_config
-from src.db.database import SessionLocal
-from src.db.models import Email
+from src.db.database import SessionLocal, engine, ensure_email_columns
+from src.db.models import Base, Email
 from src.storage import gcs
 
 
@@ -347,6 +347,9 @@ def parse_args():
 
 def main():
     options = parse_args()
+    # Labelled data may be in a database the service has not migrated yet.
+    Base.metadata.create_all(bind=engine)
+    ensure_email_columns()
     label2id = label_ids(options.folder_list)
     os.makedirs(os.path.join(BASE_OUTPUT_DIR, options.folder_list), exist_ok=True)
 

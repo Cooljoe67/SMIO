@@ -1,10 +1,16 @@
 import importlib
 import sys
 import types
+from pathlib import Path
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker
 
-from src.db.models import Email
+from src.db import database
+from src.db.models import Base, Email
 
 pytest.importorskip("sklearn")
 pytest.importorskip("optuna")
@@ -112,3 +118,95 @@ def test_scores_report_macro_and_weighted_f1(script):
 
     assert result["accuracy"] == 0.75
     assert result["macro_f1"] < result["weighted_f1"]
+
+
+DEFAULT_LABELS = ["delivery", "commercial", "social", "other", "tech"]
+
+
+class FakeTokenizer:
+    def save_pretrained(self, path):
+        Path(path, "tokenizer.json").write_text("{}")
+
+
+class FakeModel:
+    def __init__(self):
+        self.config = SimpleNamespace()
+
+    def save_pretrained(self, path):
+        Path(path, "config.json").write_text("{}")
+
+
+@pytest.fixture
+def training(script, monkeypatch, tmp_path):
+    """main() on its own database and study storage, with DistilBERT replaced by stand-ins."""
+    engine = create_engine(f"sqlite:///{(tmp_path / 'smio.db').as_posix()}")
+    Base.metadata.create_all(engine)
+    run = SimpleNamespace(
+        engine=engine, output_dir=tmp_path / "output", score=0.9, cv_texts=[], final_trainers=[],
+    )
+
+    def objective(trial, data, tokenizer, class_weights, options):
+        texts, labels, folds, label2id = data
+        run.cv_texts.append(list(texts))
+        trial.suggest_float("learning_rate", 2e-5, 4e-5, log=True)
+        trial.set_user_attr("std_fold_f1", 0.0)
+        trial.set_user_attr("out_of_fold_scores", {})
+        trial.set_user_attr("out_of_fold_predictions", list(labels))
+        trial.set_user_attr("best_epochs", [2])
+        return run.score
+
+    class FakeTrainer:
+        def __init__(self, model, args, train_dataset):
+            self.train_dataset = train_dataset
+            run.final_trainers.append(self)
+
+        def train(self):
+            pass
+
+        def predict(self, dataset):
+            # Right on every mail, so the holdout scores are known.
+            return SimpleNamespace(predictions=np.eye(max(dataset.labels) + 1)[dataset.labels])
+
+    monkeypatch.setattr(database, "engine", engine)
+    monkeypatch.setattr(script, "engine", engine)
+    monkeypatch.setattr(script, "SessionLocal", sessionmaker(bind=engine))
+    monkeypatch.setattr(script, "BASE_OUTPUT_DIR", str(run.output_dir))
+    monkeypatch.setattr(script, "STUDY_STORAGE", f"sqlite:///{(tmp_path / 'optuna.db').as_posix()}")
+    monkeypatch.setattr(
+        script, "model_location", lambda folder_list: (tmp_path / "deployed", "models/deployed")
+    )
+    monkeypatch.setattr(
+        script, "DistilBertTokenizerFast",
+        SimpleNamespace(from_pretrained=lambda *args, **kwargs: FakeTokenizer()),
+    )
+    monkeypatch.setattr(script, "TrainingArguments", lambda **kwargs: kwargs)
+    monkeypatch.setattr(script, "_new_model", lambda *args: FakeModel())
+    monkeypatch.setattr(script, "Trainer", FakeTrainer)
+    monkeypatch.setattr(script, "objective", objective)
+
+    def main(*args):
+        monkeypatch.setattr(sys, "argv", ["train", "--folds", "2", "--trials", "1", *args])
+        script.main()
+
+    run.main = main
+    yield run
+    engine.dispose()
+
+
+def test_main_migrates_a_database_from_before_folder_lists(training):
+    with training.engine.begin() as connection:
+        for column in ("account", "folder_list"):
+            connection.execute(text(f"DROP INDEX ix_emails_{column}"))
+            connection.execute(text(f"ALTER TABLE emails DROP COLUMN {column}"))
+        connection.execute(
+            text(
+                "INSERT INTO emails (text, true_label, processed, is_eval_holdout, "
+                "is_training_data) VALUES (:text, :label, 1, 0, 1)"
+            ),
+            [{"text": f"mail {index}", "label": DEFAULT_LABELS[index % 5]} for index in range(20)],
+        )
+
+    training.main()
+
+    (final,) = training.final_trainers
+    assert len(final.train_dataset.texts) == 20
