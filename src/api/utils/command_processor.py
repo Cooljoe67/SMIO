@@ -121,7 +121,7 @@ def _run_command(db, command, account):
         return {"command": command, "sent": sent, "log_lines": actual_line_count}
 
     if command == "summary":
-        summary = build_daily_summary(db, persist=False)
+        summary = build_daily_summary(db, persist=False, account=account)
         sent = append_summary_to_inbox(
             summary["message"],
             html_body=summary.get("html_message"),

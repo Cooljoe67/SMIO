@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import func
 
+from src.ai import classifier
 from src.ai.retraining_explainer import (
     explain_retraining,
     explanation_html,
@@ -16,7 +17,7 @@ from src.ai.retraining_explainer import (
     technical_lines,
 )
 from src.api.utils.folder_rules import classification_folders
-from src.api.utils.settings import app_settings
+from src.config import primary_account
 from src.db.models import Email, RetrainRun, SummarySnapshot
 
 RETRAIN_LOG_FILE = Path("./models/retrain_log.jsonl")
@@ -232,13 +233,15 @@ def _retraining_snapshot(db):
     }
 
 
-def build_daily_summary(db, summary_date=None, persist=False):
-    """Build a summary for one logical day, defaulting to yesterday."""
+def build_daily_summary(db, summary_date=None, persist=False, account=None):
+    """Build an account's summary for one logical day, defaulting to yesterday."""
+    account = account or primary_account()
     logical_date, period_start, period_end = summary_period(summary_date)
 
     emails = (
         db.query(Email)
         .filter(
+            Email.account == account.id,
             Email.is_training_data.is_(False),
             Email.processed_at.isnot(None),
             Email.processed_at >= period_start,
@@ -247,7 +250,17 @@ def build_daily_summary(db, summary_date=None, persist=False):
         .all()
     )
 
-    all_emails = db.query(Email).filter(Email.is_training_data.is_(False)).all()
+    all_emails = db.query(Email).filter(
+        Email.account == account.id,
+        Email.is_training_data.is_(False),
+    ).all()
+    # Corrections train the folder list's model, whichever account they come from.
+    corrections = db.query(Email).filter(
+        Email.folder_list == account.folder_list,
+        Email.true_label.isnot(None),
+        Email.classification_source == "imap_folder",
+    ).all()
+    folders = classification_folders(account)
 
     other_senders = sorted({
         email.sender for email in emails
@@ -255,7 +268,7 @@ def build_daily_summary(db, summary_date=None, persist=False):
     })
     new_counts = {
         classification: sum(1 for email in emails if email.classification == classification)
-        for classification in classification_folders()
+        for classification in folders
     }
     new_counts["other"] = sum(1 for email in emails if email.classification == "other")
     removed_counts = {
@@ -266,7 +279,7 @@ def build_daily_summary(db, summary_date=None, persist=False):
             and email.removal_reason == "retention"
             and email.removed_at >= period_start
         )
-        for classification in (*classification_folders(), "other")
+        for classification in (*folders, "other")
     }
     unread_counts = {
         classification: sum(
@@ -275,20 +288,20 @@ def build_daily_summary(db, summary_date=None, persist=False):
             and email.read_at is None
             and email.removed_at is None
         )
-        for classification in (*classification_folders(), "other")
+        for classification in (*folders, "other")
     }
     pending_corrections = sum(
-        1 for email in all_emails
-        if email.true_label and email.classification_source == "imap_folder"
-        and email.retrain_batch is None and not email.is_eval_holdout
+        1 for email in corrections
+        if email.retrain_batch is None and not email.is_eval_holdout
     )
-    correction_count = sum(
-        1 for email in all_emails
-        if email.true_label and email.classification_source == "imap_folder"
-    )
+    correction_count = len(corrections)
     retraining = _retraining_snapshot(db)
     deliveries = _delivery_snapshot(emails, period_start, logical_date)
-    retrain_due = pending_corrections >= RETRAIN_MIN_CORRECTIONS
+    # retrain_if_due only retrains the default folder list's model.
+    retrain_due = (
+        account.folder_list == classifier.DEFAULT_FOLDER_LIST
+        and pending_corrections >= RETRAIN_MIN_CORRECTIONS
+    )
     db_snapshot = {
         "total_entries": len(all_emails),
         "processed_entries": sum(1 for email in all_emails if email.processed_at),
@@ -299,7 +312,7 @@ def build_daily_summary(db, summary_date=None, persist=False):
     }
 
     lines = [
-        f"Hi {app_settings.user_first_name},",
+        f"Hi {account.user_first_name},",
         "SMIO daily summary",
         f"Period: {_format_datetime(period_start)} - {_format_datetime(period_end)}",
         "",
@@ -419,14 +432,17 @@ def _display_value(value):
     return value
 
 
-def gather_daily_summary(db, summary_date=None, force=False):
+def gather_daily_summary(db, summary_date=None, force=False, account=None):
     """Build and persist the snapshot for one logical day.
 
     Only the most recently stored summary date may be silently re-gathered
     (e.g. re-running the daily job soon after it already ran). Overwriting an
     older, already-completed snapshot requires force=True.
+
+    There is one snapshot per date, so the daily summary covers one account,
+    the primary one by default; per-account daily summaries are a later step.
     """
-    summary = build_daily_summary(db, summary_date=summary_date)
+    summary = build_daily_summary(db, summary_date=summary_date, account=account)
     existing = db.query(SummarySnapshot).filter(
         SummarySnapshot.summary_date == summary["summary_date"]
     ).one_or_none()
