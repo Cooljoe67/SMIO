@@ -7,6 +7,7 @@ the reply then only leaves a suggestion.
 """
 
 import logging
+import time
 from datetime import datetime, timezone
 from email.utils import parseaddr
 
@@ -107,7 +108,14 @@ def update_statuses_from_replies(db, account):
         result["waiting"] = len(pending)
         return result
 
-    for reply in pending:
+    deadline = time.monotonic() + reply_status.TIME_BUDGET_SECONDS
+    for position, reply in enumerate(pending):
+        if time.monotonic() > deadline:
+            logger.info(
+                "Account %s: status time budget used up, %d replies wait for the next run",
+                account.id, len(pending) - position,
+            )
+            break
         try:
             outcome = _check_reply(db, account, reply)
         except reply_status.StatusCheckError as error:

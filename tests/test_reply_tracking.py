@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
@@ -291,6 +292,29 @@ def test_an_unexpected_error_skips_only_that_reply_and_keeps_earlier_decisions(d
     assert (second.status, later.reply_to_id) == ("Abgeschlossen", second.id)
 
 
+def test_status_checks_stop_when_the_time_budget_is_used_up(db, haiku, monkeypatch):
+    clock = [0.0]
+    assess = reply_status.assess_reply
+
+    def slow(original, reply, reply_is_ours):
+        clock[0] += 100
+        return assess(original, reply, reply_is_ours)
+
+    monkeypatch.setattr(reply_status, "assess_reply", slow)
+    monkeypatch.setattr(reply_status, "TIME_BUDGET_SECONDS", 150)
+    monkeypatch.setattr(reply_tracking, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    _received(db, "<orig@test>")
+    replies = [
+        _reply(db, f"<r{hour}@test>", in_reply_to="<orig@test>", date=SENT + timedelta(hours=hour))
+        for hour in (1, 2, 3)
+    ]
+
+    result = reply_tracking.update_statuses_from_replies(db, primary_account())
+
+    assert result["updated"] == 2 and len(haiku.calls) == 2
+    assert replies[2].reply_checked_at is None
+
+
 # ---------- Claude call ----------
 
 class FakeMessages:
@@ -378,6 +402,26 @@ def test_connection_problems_are_retried_next_run(api, error):
     api(getattr(httpx2, error)("no answer"))
 
     assert _failure_kind() == "retryable"
+
+
+def test_a_stalled_call_gives_up_after_30_seconds_and_one_retry(monkeypatch):
+    anthropic = pytest.importorskip("anthropic")
+    httpx2 = pytest.importorskip("httpx2")
+    timeouts = []
+
+    def handler(request):
+        timeouts.append(request.extensions["timeout"])
+        overloaded = _api_error("overloaded_error", "Overloaded")
+        return httpx2.Response(529, json=overloaded, headers={"retry-after-ms": "1"})
+
+    http_client = httpx2.Client(transport=httpx2.MockTransport(handler))
+    # The client _get_client builds, with only the network replaced.
+    monkeypatch.setattr(anthropic, "Anthropic", partial(anthropic.Anthropic, http_client=http_client))
+    monkeypatch.setattr(reply_status, "_client", None)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+
+    assert _failure_kind() == "retryable"
+    assert timeouts == [{"connect": 5.0, "read": 30.0, "write": 30.0, "pool": 30.0}] * 2
 
 
 def test_mail_text_is_capped():

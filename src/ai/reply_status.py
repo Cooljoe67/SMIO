@@ -16,6 +16,9 @@ MODEL = os.getenv("SMIO_STATUS_MODEL", "claude-haiku-4-5")
 MIN_CONFIDENCE = float(os.getenv("SMIO_STATUS_MIN_CONFIDENCE", "0.8"))
 # Roughly 1000 tokens per mail.
 MAX_MAIL_CHARS = int(os.getenv("SMIO_STATUS_MAX_MAIL_CHARS", "3200"))
+# Status checks of an account stop after this many seconds per run, so the
+# workflow lock is released; the remaining replies wait for the next run.
+TIME_BUDGET_SECONDS = float(os.getenv("SMIO_STATUS_TIME_BUDGET_SECONDS", "120"))
 
 STATUSES = (
     "Zu erledigen",
@@ -87,7 +90,9 @@ def _get_client():
     if _client is None:
         import anthropic
 
-        _client = anthropic.Anthropic()
+        # The SDK default (600 s read timeout, 2 retries) lets one stalled call
+        # hold the workflow lock for half an hour.
+        _client = anthropic.Anthropic(timeout=anthropic.Timeout(30.0, connect=5.0), max_retries=1)
     return _client
 
 
