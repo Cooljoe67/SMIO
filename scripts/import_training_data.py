@@ -1,14 +1,23 @@
 # scripts/import_training_data.py
 
 from src.config import primary_account
-from src.db.database import SessionLocal
-from src.db.models import Email
+from src.db.database import SessionLocal, engine, ensure_email_columns
+from src.db.models import Base, Email
 from src.api.utils.folder_rules import folder_path, folder_rules
-from src.api.utils.imap_client import open_mailbox
+from src.api.utils.imap_client import _message_id, open_mailbox
 
 def import_training_data():
+    # The insert names every mapped column, so an old database is migrated first.
+    Base.metadata.create_all(bind=engine)
+    ensure_email_columns()
     db = SessionLocal()
     account = primary_account()
+    # Mails already stored (in the mailbox or by an earlier import) are skipped,
+    # so the import can be repeated without training on duplicates.
+    stored_message_ids = {
+        message_id
+        for (message_id,) in db.query(Email.message_id).filter(Email.message_id.isnot(None))
+    }
 
     with open_mailbox(account) as mailbox:
         for label in folder_rules(account):
@@ -24,8 +33,17 @@ def import_training_data():
             print(f"Importing from {folder} → true_label: {label}")
 
             for msg in mailbox.fetch():
+                message_id = _message_id(msg) or None
+                if message_id in stored_message_ids:
+                    continue
+                if message_id:
+                    stored_message_ids.add(message_id)
+
                 email = Email(
-                    account=account.id,
+                    # Labelled data belongs to no mailbox, like the TSV import.
+                    account=None,
+                    folder_list=account.folder_list,
+                    message_id=message_id,
                     subject=msg.subject,
                     sender=msg.from_,
                     date=msg.date,
