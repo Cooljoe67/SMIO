@@ -1,12 +1,15 @@
 """Updates the status of a mail when a reply in its thread arrives or is sent.
 
-Replies are linked through In-Reply-To/References, or else the case reference.
+Replies are linked through In-Reply-To/References, or else the case reference
+once case_ref is filled. Today only imported training rows have one, and those
+are never linked, so mailbox mail is linked through the headers alone.
 The status belongs to the received mail the thread is about, so the walk skips
 the account's own sent mails. A status set by the user is never overwritten;
 the reply then only leaves a suggestion.
 """
 
 import logging
+import time
 from datetime import datetime, timezone
 from email.utils import parseaddr
 
@@ -45,6 +48,7 @@ def _thread_target(db, account, reply):
         for candidate in emails.filter(Email.message_id == message_id).all():
             if not _is_own(candidate, account):
                 return candidate
+    # Applies once case_ref is filled for mailbox mail; today only imported rows have it.
     if reply.case_ref:
         candidates = emails.filter(
             Email.case_ref == reply.case_ref,
@@ -80,6 +84,23 @@ def apply_decision(target, decision):
     return "suggested"
 
 
+def _check_reply(db, account, reply):
+    """Link one reply and apply Haiku's decision; returns the outcome."""
+    target = _thread_target(db, account, reply)
+    if target is None or _is_own(target, account) or target.classification_source == "system":
+        reply.reply_checked_at = _now()
+        return "unlinked"
+    decision = reply_status.assess_reply(target, reply, reply_is_ours=_is_own(reply, account))
+    reply.reply_to_id = target.id
+    reply.reply_checked_at = _now()
+    outcome = apply_decision(target, decision)
+    logger.info(
+        "Email %s: reply %s -> %s %s (%.2f)",
+        target.id, reply.id, outcome, decision.status, decision.confidence,
+    )
+    return outcome
+
+
 def update_statuses_from_replies(db, account):
     """Check new replies of an account; returns counts per outcome."""
     result = {"updated": 0, "suggested": 0, "unlinked": 0, "failed": 0, "waiting": 0}
@@ -90,29 +111,35 @@ def update_statuses_from_replies(db, account):
         result["waiting"] = len(pending)
         return result
 
-    for reply in pending:
-        target = _thread_target(db, account, reply)
-        if target is None or _is_own(target, account) or target.classification_source == "system":
-            reply.reply_checked_at = _now()
-            result["unlinked"] += 1
-            continue
+    deadline = time.monotonic() + reply_status.TIME_BUDGET_SECONDS
+    for position, reply in enumerate(pending):
+        if time.monotonic() > deadline:
+            logger.info(
+                "Account %s: status time budget used up, %d replies wait for the next run",
+                account.id, len(pending) - position,
+            )
+            break
         try:
-            decision = reply_status.assess_reply(target, reply, reply_is_ours=_is_own(reply, account))
+            outcome = _check_reply(db, account, reply)
         except reply_status.StatusCheckError as error:
-            logger.warning("Status check for reply %s failed: %s", reply.id, error)
             result["failed"] += 1
-            if error.retryable:
+            if error.kind == "fatal":
+                # Key, credit or model problem: every reply waits until it is fixed.
+                logger.error("Status checks for account %s stopped: %s", account.id, error)
+                break
+            logger.warning("Status check for reply %s failed: %s", reply.id, error)
+            if error.kind == "retryable":
                 # Rate limit or outage: stop and try again next run.
                 break
             reply.reply_checked_at = _now()
-            continue
-        reply.reply_to_id = target.id
-        reply.reply_checked_at = _now()
-        outcome = apply_decision(target, decision)
-        result[outcome] += 1
-        logger.info(
-            "Email %s: reply %s -> %s %s (%.2f)",
-            target.id, reply.id, outcome, decision.status, decision.confidence,
-        )
-    db.commit()
+        except Exception:
+            # One broken reply must not block the others; drop its partial changes.
+            logger.exception("Status check for reply %s failed", reply.id)
+            db.rollback()
+            reply.reply_checked_at = _now()
+            result["failed"] += 1
+        else:
+            result[outcome] += 1
+        # Each decision is a paid call; keep it even if a later reply fails.
+        db.commit()
     return result

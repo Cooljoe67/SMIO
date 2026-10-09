@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
@@ -49,6 +50,46 @@ def haiku(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
     monkeypatch.setattr(reply_status, "assess_reply", assess)
     return SimpleNamespace(calls=calls, answer=answer)
+
+
+ANSWER = '{"status": "Abgeschlossen", "confidence": 0.95, "reason": "Erledigt."}'
+
+
+def _answer(stop_reason, text):
+    return {
+        "id": "msg_1", "type": "message", "role": "assistant", "model": reply_status.MODEL,
+        "content": [] if text is None else [{"type": "text", "text": text}],
+        "stop_reason": stop_reason, "stop_sequence": None, "usage": {"input_tokens": 1, "output_tokens": 1},
+    }
+
+
+def _api_error(error_type, message):
+    return {"type": "error", "error": {"type": error_type, "message": message}}
+
+
+@pytest.fixture
+def api(monkeypatch):
+    """The real SDK client; its HTTP transport serves the given responses in order, repeating the last."""
+    anthropic = pytest.importorskip("anthropic")
+    httpx2 = pytest.importorskip("httpx2")  # the SDK's HTTP library
+
+    def use(*responses):
+        queue = list(responses)
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            response = queue.pop(0) if len(queue) > 1 else queue[0]
+            if isinstance(response, Exception):
+                raise response
+            status, body = response
+            return httpx2.Response(status, json=body)
+
+        http_client = httpx2.Client(transport=httpx2.MockTransport(handler))
+        sdk = anthropic.Anthropic(api_key="test", http_client=http_client, max_retries=0)
+        monkeypatch.setattr(reply_status, "_client", sdk)
+        return requests
+    return use
 
 
 # ---------- Sent folder ----------
@@ -131,12 +172,25 @@ def test_their_answer_to_our_reply_updates_the_original_mail(db, haiku):
 
 
 def test_case_reference_links_mails_without_thread_headers(db, haiku):
+    # Set by hand: nothing fills case_ref for mailbox mail yet.
     original = _received(db, "<orig@test>", case_ref="VG:NOR-1")
     later = _reply(db, "<later@test>", outbound=False, case_ref="VG:NOR-1")
 
     reply_tracking.update_statuses_from_replies(db, primary_account())
 
     assert haiku.calls == [(original.id, later.id, False)]
+
+
+def test_imported_rows_with_a_case_reference_are_never_linked(db, haiku):
+    # Today only imported training rows carry case_ref; they are neither replies nor targets.
+    _received(db, "<imported@test>", case_ref="VG:NOR-1", is_training_data=True)
+    imported_reply = _reply(db, "<imported-reply@test>", outbound=False, case_ref="VG:NOR-1", is_training_data=True)
+    mailbox_reply = _reply(db, "<later@test>", outbound=False, case_ref="VG:NOR-1")
+
+    result = reply_tracking.update_statuses_from_replies(db, primary_account())
+
+    assert result["unlinked"] == 1 and haiku.calls == []
+    assert mailbox_reply.reply_checked_at is not None and imported_reply.reply_checked_at is None
 
 
 def test_replies_to_smio_mails_are_not_checked(db, haiku):
@@ -182,7 +236,7 @@ def test_without_api_key_replies_wait(db, haiku, monkeypatch):
 
 
 def test_retryable_errors_stop_and_retry_later(db, haiku):
-    haiku.answer["decision"] = reply_status.StatusCheckError("rate limited", retryable=True)
+    haiku.answer["decision"] = reply_status.StatusCheckError("rate limited", "retryable")
     _received(db, "<orig@test>")
     first = _reply(db, "<r1@test>", in_reply_to="<orig@test>")
     _reply(db, "<r2@test>", in_reply_to="<orig@test>", date=SENT + timedelta(hours=2))
@@ -194,13 +248,97 @@ def test_retryable_errors_stop_and_retry_later(db, haiku):
 
 
 def test_permanent_errors_are_not_retried(db, haiku):
-    haiku.answer["decision"] = reply_status.StatusCheckError("bad request", retryable=False)
+    haiku.answer["decision"] = reply_status.StatusCheckError("bad request", "request")
     _received(db, "<orig@test>")
     reply = _reply(db, "<r@test>", in_reply_to="<orig@test>")
 
     reply_tracking.update_statuses_from_replies(db, primary_account())
 
     assert reply.reply_checked_at is not None
+
+
+def test_account_wide_errors_keep_all_replies_pending(db, api, monkeypatch, caplog):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    requests = api((401, _api_error("authentication_error", "invalid x-api-key")))
+    _received(db, "<orig@test>")
+    first = _reply(db, "<r1@test>", in_reply_to="<orig@test>")
+    second = _reply(db, "<r2@test>", in_reply_to="<orig@test>", date=SENT + timedelta(hours=2))
+
+    result = reply_tracking.update_statuses_from_replies(db, primary_account())
+
+    # One failing call, then nothing is marked, so the backlog is checked once the key works.
+    assert result["failed"] == 1 and len(requests) == 1
+    assert first.reply_checked_at is None and second.reply_checked_at is None
+    assert [r.levelname for r in caplog.records if "stopped" in r.getMessage()] == ["ERROR"]
+
+
+def test_an_unusable_answer_skips_only_that_reply(db, api, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    api(
+        (200, _answer("end_turn", ANSWER)),
+        (200, _answer("max_tokens", '{"status": "Abgeschl')),
+        (200, _answer("end_turn", ANSWER)),
+    )
+    original = _received(db, "<orig@test>")
+    replies = [
+        _reply(db, f"<r{hour}@test>", in_reply_to="<orig@test>", date=SENT + timedelta(hours=hour))
+        for hour in (1, 2, 3)
+    ]
+
+    result = reply_tracking.update_statuses_from_replies(db, primary_account())
+
+    assert (result["updated"], result["failed"]) == (2, 1)
+    assert [reply.reply_to_id for reply in replies] == [original.id, None, original.id]
+    assert all(reply.reply_checked_at is not None for reply in replies)
+
+
+def test_an_unexpected_error_skips_only_that_reply_and_keeps_earlier_decisions(db, haiku, monkeypatch, caplog):
+    assess = reply_status.assess_reply
+
+    def flaky(original, reply, reply_is_ours):
+        if reply.message_id == "<broken@test>":
+            raise KeyError("boom")
+        return assess(original, reply, reply_is_ours)
+
+    monkeypatch.setattr(reply_status, "assess_reply", flaky)
+    first = _received(db, "<a@test>", status="Zu erledigen")
+    done = _reply(db, "<done@test>", in_reply_to="<a@test>")
+    second = _received(db, "<b@test>", status="Zu erledigen")
+    broken = _reply(db, "<broken@test>", in_reply_to="<b@test>", date=SENT + timedelta(hours=2))
+    later = _reply(db, "<later@test>", in_reply_to="<b@test>", date=SENT + timedelta(hours=3))
+
+    result = reply_tracking.update_statuses_from_replies(db, primary_account())
+
+    assert (result["updated"], result["failed"]) == (2, 1)
+    assert any(record.exc_info for record in caplog.records)
+    # The broken reply's rollback must not undo the decision committed before it.
+    db.rollback()
+    assert (first.status, done.reply_to_id) == ("Abgeschlossen", first.id)
+    assert broken.reply_checked_at is not None and broken.reply_to_id is None
+    assert (second.status, later.reply_to_id) == ("Abgeschlossen", second.id)
+
+
+def test_status_checks_stop_when_the_time_budget_is_used_up(db, haiku, monkeypatch):
+    clock = [0.0]
+    assess = reply_status.assess_reply
+
+    def slow(original, reply, reply_is_ours):
+        clock[0] += 100
+        return assess(original, reply, reply_is_ours)
+
+    monkeypatch.setattr(reply_status, "assess_reply", slow)
+    monkeypatch.setattr(reply_status, "TIME_BUDGET_SECONDS", 150)
+    monkeypatch.setattr(reply_tracking, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    _received(db, "<orig@test>")
+    replies = [
+        _reply(db, f"<r{hour}@test>", in_reply_to="<orig@test>", date=SENT + timedelta(hours=hour))
+        for hour in (1, 2, 3)
+    ]
+
+    result = reply_tracking.update_statuses_from_replies(db, primary_account())
+
+    assert result["updated"] == 2 and len(haiku.calls) == 2
+    assert replies[2].reply_checked_at is None
 
 
 # ---------- Claude call ----------
@@ -240,12 +378,76 @@ def test_assess_reply_asks_haiku_with_both_mails(client):
     assert "Bitte CMR senden" in prompt and "<b>" not in prompt
 
 
-def test_refusal_is_a_permanent_error(client):
-    client(SimpleNamespace(stop_reason="refusal", parsed_output=None))
-
+def _failure_kind():
     with pytest.raises(reply_status.StatusCheckError) as error:
         reply_status.assess_reply(Email(), Email(), reply_is_ours=False)
-    assert error.value.retryable is False
+    return error.value.kind
+
+
+def test_assess_reply_reads_the_answer_through_the_sdk(api):
+    api((200, _answer("end_turn", ANSWER)))
+
+    decision = reply_status.assess_reply(Email(), Email(), reply_is_ours=False)
+
+    assert decision == reply_status.StatusDecision(status="Abgeschlossen", confidence=0.95, reason="Erledigt.")
+
+
+@pytest.mark.parametrize("stop_reason, text", [
+    ("max_tokens", '{"status": "Abgeschl'),
+    ("refusal", "Dazu kann ich nichts sagen."),
+    ("refusal", ""),
+    ("refusal", None),
+])
+def test_unusable_answers_fail_only_this_request(api, stop_reason, text):
+    api((200, _answer(stop_reason, text)))
+
+    assert _failure_kind() == "request"
+
+
+@pytest.mark.parametrize("status, error_type, message, kind", [
+    (401, "authentication_error", "invalid x-api-key", "fatal"),
+    (402, "billing_error", "Payment required", "fatal"),
+    (400, "invalid_request_error", "Your credit balance is too low to access the Anthropic API.", "fatal"),
+    (403, "permission_error", "Your API key does not have permission", "fatal"),
+    (404, "not_found_error", "model: claude-haiku-0", "fatal"),
+    (400, "invalid_request_error", "prompt is too long", "request"),
+    (413, "request_too_large", "Request exceeds the maximum size", "request"),
+    (429, "rate_limit_error", "Number of requests has exceeded your rate limit", "retryable"),
+    (500, "api_error", "Internal server error", "retryable"),
+    (529, "overloaded_error", "Overloaded", "retryable"),
+])
+def test_api_errors_are_classified_by_scope(api, status, error_type, message, kind):
+    api((status, _api_error(error_type, message)))
+
+    assert _failure_kind() == kind
+
+
+@pytest.mark.parametrize("error", ["ConnectError", "ReadTimeout"])
+def test_connection_problems_are_retried_next_run(api, error):
+    httpx2 = pytest.importorskip("httpx2")
+    api(getattr(httpx2, error)("no answer"))
+
+    assert _failure_kind() == "retryable"
+
+
+def test_a_stalled_call_gives_up_after_30_seconds_and_one_retry(monkeypatch):
+    anthropic = pytest.importorskip("anthropic")
+    httpx2 = pytest.importorskip("httpx2")
+    timeouts = []
+
+    def handler(request):
+        timeouts.append(request.extensions["timeout"])
+        overloaded = _api_error("overloaded_error", "Overloaded")
+        return httpx2.Response(529, json=overloaded, headers={"retry-after-ms": "1"})
+
+    http_client = httpx2.Client(transport=httpx2.MockTransport(handler))
+    # The client _get_client builds, with only the network replaced.
+    monkeypatch.setattr(anthropic, "Anthropic", partial(anthropic.Anthropic, http_client=http_client))
+    monkeypatch.setattr(reply_status, "_client", None)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+
+    assert _failure_kind() == "retryable"
+    assert timeouts == [{"connect": 5.0, "read": 30.0, "write": 30.0, "pool": 30.0}] * 2
 
 
 def test_mail_text_is_capped():

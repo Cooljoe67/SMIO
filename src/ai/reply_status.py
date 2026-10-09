@@ -9,13 +9,16 @@ import os
 import re
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 MODEL = os.getenv("SMIO_STATUS_MODEL", "claude-haiku-4-5")
 # A decision below this confidence is kept as a suggestion only.
 MIN_CONFIDENCE = float(os.getenv("SMIO_STATUS_MIN_CONFIDENCE", "0.8"))
 # Roughly 1000 tokens per mail.
 MAX_MAIL_CHARS = int(os.getenv("SMIO_STATUS_MAX_MAIL_CHARS", "3200"))
+# Status checks of an account stop after this many seconds per run, so the
+# workflow lock is released; the remaining replies wait for the next run.
+TIME_BUDGET_SECONDS = float(os.getenv("SMIO_STATUS_TIME_BUDGET_SECONDS", "120"))
 
 STATUSES = (
     "Zu erledigen",
@@ -45,9 +48,15 @@ class StatusDecision(BaseModel):
 
 
 class StatusCheckError(RuntimeError):
-    def __init__(self, message, retryable):
+    """A status check that failed. kind tells the caller what to do with the reply:
+    "retryable" (rate limit, outage) and "fatal" (key, credit or model, so every
+    call fails alike) leave it for the next run; "request" (only this reply
+    cannot be assessed) skips it for good.
+    """
+
+    def __init__(self, message, kind):
         super().__init__(message)
-        self.retryable = retryable
+        self.kind = kind
 
 
 def enabled():
@@ -81,7 +90,9 @@ def _get_client():
     if _client is None:
         import anthropic
 
-        _client = anthropic.Anthropic()
+        # The SDK default (600 s read timeout, 2 retries) lets one stalled call
+        # hold the workflow lock for half an hour.
+        _client = anthropic.Anthropic(timeout=anthropic.Timeout(30.0, connect=5.0), max_retries=1)
     return _client
 
 
@@ -103,11 +114,32 @@ def assess_reply(original, reply, reply_is_ours):
             messages=[{"role": "user", "content": prompt}],
             output_format=StatusDecision,
         )
+    except (anthropic.AuthenticationError, anthropic.PermissionDeniedError, anthropic.NotFoundError) as error:
+        # Wrong key or model: every further call would fail the same way.
+        raise StatusCheckError(str(error), "fatal") from error
+    except anthropic.BadRequestError as error:
+        # Used-up prepaid credit comes back as a 400.
+        kind = "fatal" if "credit balance" in str(error).lower() else "request"
+        raise StatusCheckError(str(error), kind) from error
     except (anthropic.RateLimitError, anthropic.APIConnectionError) as error:
-        raise StatusCheckError(str(error), retryable=True) from error
+        raise StatusCheckError(str(error), "retryable") from error
     except anthropic.APIStatusError as error:
-        raise StatusCheckError(str(error), retryable=error.status_code >= 500) from error
+        # 402 is a billing problem; 5xx (529 overloaded included) an outage.
+        if error.status_code == 402:
+            kind = "fatal"
+        elif error.status_code >= 500:
+            kind = "retryable"
+        else:
+            kind = "request"
+        raise StatusCheckError(str(error), kind) from error
+    except ValidationError as error:
+        # parse() validates the JSON before it returns, so a truncated or
+        # refused answer with text fails here, not at the stop_reason check.
+        raise StatusCheckError(f"Unparseable answer: {error}", "request") from error
+    except anthropic.APIError as error:
+        # E.g. a response the SDK cannot read; specific to this call.
+        raise StatusCheckError(str(error), "request") from error
 
     if response.stop_reason in ("refusal", "max_tokens") or response.parsed_output is None:
-        raise StatusCheckError(f"No usable answer (stop_reason={response.stop_reason})", retryable=False)
+        raise StatusCheckError(f"No usable answer (stop_reason={response.stop_reason})", "request")
     return response.parsed_output
