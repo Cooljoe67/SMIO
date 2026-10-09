@@ -104,3 +104,13 @@ def test_skipped_accounts_and_runs_are_not_failures(accounts, client, monkeypatc
         workflows._workflow_lock.release()
     assert response.status_code == 200
     assert response.json() == {"skipped": True, "reason": "workflow_in_progress"}
+
+
+def test_a_fatal_claude_stop_answers_500(accounts, client, monkeypatch):
+    monkeypatch.setattr(
+        workflows, "_process_account",
+        lambda account, is_primary: {"reply_status": {"failed": 1, "stopped": "fatal: invalid x-api-key"}},
+    )
+    monkeypatch.setattr(workflows, "persist_database", lambda: False)
+
+    assert client.post("/jobs/five-minute").status_code == 500

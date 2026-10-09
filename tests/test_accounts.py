@@ -226,13 +226,24 @@ def test_pending_commands_are_reported_to_their_own_account(
     assert notified == ([accounts[account_index].id] if handled else [])
 
 
-def test_retrain_is_refused_for_other_folder_lists(db, accounts):
+def test_retrain_acts_on_the_default_model_whatever_the_primary_list(db, accounts, monkeypatch):
     _, second = accounts
+    calls = []
+    monkeypatch.setattr(command_processor, "retrain_if_due", lambda db, **kwargs: calls.append(kwargs) or {"retrained": True})
 
     result = command_processor._run_command(db, "retrain", second, is_primary=True)
 
-    assert "small" in result["error"]
-    assert command_processor._command_failed(result)
+    assert calls == [{"min_corrections": 0}]
+    assert not command_processor._command_failed(result)
+
+
+def test_reload_model_reloads_every_loaded_list(db, accounts, monkeypatch):
+    first, _ = accounts
+    monkeypatch.setattr(command_processor.classifier, "reload_models", lambda: ["default", "small"])
+
+    result = command_processor._run_command(db, "reload model", first, is_primary=True)
+
+    assert result["reloaded"] == ["default", "small"]
 
 
 def test_existing_mails_get_the_primary_account_and_original_folder_list(tmp_path, monkeypatch, accounts):

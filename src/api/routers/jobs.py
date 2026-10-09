@@ -23,7 +23,10 @@ def five_minute_job():
     result = run_five_minute_workflow()
     # Every account was processed and the database persisted; still let Cloud
     # Scheduler see a failed mailbox as a failed run.
-    if any("error" in outcome for outcome in result.get("accounts", {}).values()):
+    if any(
+        "error" in outcome or (outcome.get("reply_status") or {}).get("stopped")
+        for outcome in result.get("accounts", {}).values()
+    ):
         return JSONResponse(status_code=500, content=jsonable_encoder(result))
     return result
 

@@ -40,7 +40,7 @@ def service_calls(monkeypatch):
         command_processor, "retrain_if_due", lambda db, **kwargs: calls.append("retrain") or {}
     )
     monkeypatch.setattr(
-        command_processor.classifier, "reload_model", lambda folder_list: calls.append("reload")
+        command_processor.classifier, "reload_models", lambda: calls.append("reload") or ["default"]
     )
     monkeypatch.setattr(
         command_processor, "restore_previous_model", lambda: calls.append("restore") or {}

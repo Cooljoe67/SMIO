@@ -418,7 +418,7 @@ def publish(deploy_dir, gcs_prefix):
         print(f"Archived the live model to GCS prefix {archive_prefix}.")
     if not gcs.upload_directory(deploy_dir, gcs_prefix):
         raise RuntimeError("GCS is not configured (GCS_BUCKET); model not published")
-    print(f"Published to GCS prefix {gcs_prefix}; send RELOAD MODEL to use it.")
+    print(f"Published to GCS prefix {gcs_prefix}; send RELOAD MODEL from the primary account to use it.")
 
 
 # ---------- Main ----------

@@ -111,6 +111,15 @@ def reload_model(folder_list=DEFAULT_FOLDER_LIST):
         _models[folder_list] = loaded
 
 
+def reload_models():
+    """Reload every model this process has loaded, plus the default one; returns the lists."""
+    with _models_lock:
+        folder_lists = sorted(set(_models) | {DEFAULT_FOLDER_LIST})
+    for folder_list in folder_lists:
+        reload_model(folder_list)
+    return folder_lists
+
+
 def predict_email(email, folder_list=DEFAULT_FOLDER_LIST):
     """Label and confidence of a mail, built in the input format the model was trained on."""
     input_format = _get(folder_list)[3]

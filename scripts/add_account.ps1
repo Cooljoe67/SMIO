@@ -160,10 +160,11 @@ function ConvertTo-YamlString {
 
 Assert-Command "gcloud"
 
-$AccountId = Read-RequiredValue $AccountId "Account id (lowercase letters, digits, hyphens)"
-# Part of the secret name, and the key of the account's stored mails.
-if ($AccountId -cnotmatch '^[a-z0-9][a-z0-9-]*$') {
-    throw "Account id '$AccountId' may only contain lowercase letters, digits and hyphens."
+$AccountId = Read-RequiredValue $AccountId "Account id (lowercase letters, digits, hyphens; starts with a letter)"
+# Part of the secret name, and the key of the account's stored mails. A leading
+# letter keeps YAML from reading ids like 2, no or 2024-01-15 as other types.
+if ($AccountId -cnotmatch '^[a-z][a-z0-9-]*$') {
+    throw "Account id '$AccountId' must start with a lowercase letter and contain only lowercase letters, digits and hyphens."
 }
 $ImapHost = Read-RequiredValue $ImapHost "IMAP host"
 $ImapUser = Read-RequiredValue $ImapUser "IMAP username"
@@ -183,16 +184,18 @@ if ([string]::IsNullOrWhiteSpace($Email)) {
 $YamlHost = ConvertTo-YamlString $ImapHost
 $YamlUser = ConvertTo-YamlString $ImapUser
 $YamlEmail = ConvertTo-YamlString $Email
+$YamlId = ConvertTo-YamlString $AccountId
+$YamlFolderList = ConvertTo-YamlString $FolderList
 
 Write-Host ""
 Write-Host "Add this entry under 'accounts:' in the service's config (adjust the mailbox"
 Write-Host "folder names to this server):"
 Write-Host ""
 Write-Host @"
-  - id: $AccountId
+  - id: $YamlId
     provider: imap
     email: $YamlEmail
-    folder_list: $FolderList
+    folder_list: $YamlFolderList
     mailbox:
       inbox: INBOX
       folder_root: INBOX

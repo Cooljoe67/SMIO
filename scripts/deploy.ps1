@@ -13,13 +13,13 @@ param(
     [string]$GcsModelPrefix = "models/distilbert_deployed",
     [string]$GcsNerModelPrefix = "",
     [string]$GcsDatabaseObject = "databases/smio.db",
+    [string]$GcsConfigObject = "",
     [string]$SchedulerLocation = "",
     [string]$FiveMinuteSchedulerJob = "smio-five-minute",
     [string]$DailySchedulerJob = "smio-daily",
     [string]$RuntimeServiceAccount = "",
     [string]$ImapHostSecret = "imap-host",
     [string]$ImapUserSecret = "imap-user",
-    [string]$ImapPasswordSecret = "imap-password",
     [string]$AnthropicApiKeySecret = "claude-api-key",
     [switch]$UpdateNerModel,
     [string]$NerModelDirectory = ".\models\ner-smio"
@@ -68,6 +68,11 @@ $ProjectId = Resolve-ConfigValue $ProjectId "GCP_PROJECT_ID" $DotEnvValues
 $Region = Resolve-ConfigValue $Region "GCP_REGION" $DotEnvValues
 $GcsBucket = Resolve-ConfigValue $GcsBucket "GCS_BUCKET" $DotEnvValues
 $GcsNerModelPrefix = Resolve-ConfigValue $GcsNerModelPrefix "GCS_NER_MODEL_PREFIX" $DotEnvValues
+# The service and add_account.ps1 must use the same GCS copy of config/smio.yaml.
+$GcsConfigObject = Resolve-ConfigValue $GcsConfigObject "GCS_CONFIG_OBJECT" $DotEnvValues
+if ([string]::IsNullOrWhiteSpace($GcsConfigObject)) {
+    $GcsConfigObject = "config/smio.yaml"
+}
 $ConfiguredCommandTimeout = Resolve-ConfigValue "" "SMIO_COMMAND_TIMEOUT_MINUTES" $DotEnvValues
 if ($CommandTimeoutMinutes -le 0) {
     if ([string]::IsNullOrWhiteSpace($ConfiguredCommandTimeout)) {
@@ -357,7 +362,9 @@ Invoke-Gcloud @("services", "enable", "artifactregistry.googleapis.com", "run.go
 Confirm-Secret $ImapHostSecret "IMAP host" -Default (Resolve-ConfigValue "" "IMAP_HOST" $DotEnvValues) | Out-Null
 Confirm-Secret $ImapUserSecret "IMAP user" -Default (Resolve-ConfigValue "" "IMAP_USER" $DotEnvValues) | Out-Null
 # Not bound to the service: the app reads it at login (password_secret in config/smio.yaml).
-Confirm-Secret $ImapPasswordSecret "IMAP password" -Hidden | Out-Null
+# The service reads it at login under the name config/smio.yaml refers to
+# (password_secret), so the name is fixed here.
+Confirm-Secret "imap-password" "IMAP password" -Hidden | Out-Null
 $anthropicSecretExists = Confirm-Secret $AnthropicApiKeySecret "Anthropic API key (Enter to skip)" -Hidden -Optional
 
 $repositoryCheckErrorAction = $ErrorActionPreference
@@ -463,7 +470,7 @@ if ($UpdateNerModel) {
     }
 }
 
-$deployEnvVars = "GOOGLE_CLOUD_PROJECT=$ProjectId,GCS_BUCKET=$GcsBucket,GCS_CLASSIFIER_MODEL_PREFIX=$GcsModelPrefix,GCS_NER_MODEL_PREFIX=$GcsNerModelPrefix,GCS_DATABASE_OBJECT=$GcsDatabaseObject,SMIO_SUMMARY_START_HOUR=$SummaryStartHour,SMIO_SUMMARY_TIMEZONE=$SummaryTimezone,SMIO_COMMAND_TIMEOUT_MINUTES=$CommandTimeoutMinutes"
+$deployEnvVars = "GOOGLE_CLOUD_PROJECT=$ProjectId,GCS_BUCKET=$GcsBucket,GCS_CLASSIFIER_MODEL_PREFIX=$GcsModelPrefix,GCS_NER_MODEL_PREFIX=$GcsNerModelPrefix,GCS_DATABASE_OBJECT=$GcsDatabaseObject,GCS_CONFIG_OBJECT=$GcsConfigObject,SMIO_SUMMARY_START_HOUR=$SummaryStartHour,SMIO_SUMMARY_TIMEZONE=$SummaryTimezone,SMIO_COMMAND_TIMEOUT_MINUTES=$CommandTimeoutMinutes"
 if ($NerModelRevision) {
     $deployEnvVars += ",SMIO_NER_MODEL_REVISION=$NerModelRevision"
 }

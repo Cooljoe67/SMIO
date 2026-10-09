@@ -87,19 +87,13 @@ def _run_command(db, command, account, is_primary=False):
             "error": f"{command.upper()} is not permitted for this account; only the primary account may use it.",
         }
 
-    if command in {"retrain", "restore model"} and account.folder_list != classifier.DEFAULT_FOLDER_LIST:
-        return {
-            "command": command,
-            "error": f"Not yet supported for folder list {account.folder_list!r}.",
-        }
-
     if command == "retrain":
         result = retrain_if_due(db, min_corrections=0)
         return {"command": command, **result}
 
     if command == "reload model":
-        classifier.reload_model(account.folder_list)
-        return {"command": command, "reloaded": True}
+        # A model may have been published for any list, not only the primary's.
+        return {"command": command, "reloaded": classifier.reload_models()}
 
     if command == "restore model":
         return {"command": command, **restore_previous_model()}

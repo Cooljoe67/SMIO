@@ -230,3 +230,12 @@ def test_restore_after_a_cold_start_archives_the_live_model_first(
         if name.startswith(retrain.MODEL_ARCHIVE_PREFIX) and name.endswith("model.safetensors")
     }
     assert sorted(archived.values()) == [b"live", b"previous"]
+
+
+def test_forced_retrain_without_corrections_is_a_clean_no_op(db, retrain):
+    db.add(Email(folder_list="default", true_label="tech", text="holdout", is_eval_holdout=True))
+    db.commit()
+
+    result = retrain.retrain_if_due(db, min_corrections=0)
+
+    assert result == {"retrained": False, "reason": "no_corrections", "pending_corrections": 0}

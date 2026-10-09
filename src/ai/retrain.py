@@ -522,6 +522,10 @@ def retrain_if_due(db, min_corrections=MIN_CORRECTIONS):
         )
         return {"retrained": False, "pending_corrections": len(corrections)}
 
+    if not corrections:
+        # A forced RETRAIN right after deploy: nothing new to learn from.
+        return {"retrained": False, "reason": "no_corrections", "pending_corrections": 0}
+
     eval_texts, eval_labels = _load_holdout(db)
     if not eval_texts:
         logger.warning(
@@ -537,6 +541,8 @@ def retrain_if_due(db, min_corrections=MIN_CORRECTIONS):
     )
 
     dataset_emails, batch_sizes = build_replay_batch(db, train_emails)
+    if not dataset_emails:
+        return {"retrained": False, "reason": "no_training_data", "pending_corrections": len(corrections)}
     train_texts = [email.text or "" for email in dataset_emails]
     train_labels = [LABEL2ID[email.true_label] for email in dataset_emails]
 

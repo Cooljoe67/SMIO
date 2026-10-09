@@ -452,3 +452,25 @@ def test_a_stalled_call_gives_up_after_30_seconds_and_one_retry(monkeypatch):
 
 def test_mail_text_is_capped():
     assert len(reply_status.mail_text(Email(text="x " * 5000), max_chars=100)) == 100
+
+
+def test_a_fatal_stop_is_reported_in_the_result(db, haiku):
+    haiku.answer["decision"] = reply_status.StatusCheckError("invalid x-api-key", "fatal")
+    _received(db, "<orig@test>")
+    _reply(db, "<r@test>", in_reply_to="<orig@test>")
+
+    result = reply_tracking.update_statuses_from_replies(db, primary_account())
+
+    assert result["stopped"] == "fatal: invalid x-api-key"
+
+
+def test_a_reply_to_a_reused_message_id_updates_the_newest_earlier_mail(db, haiku):
+    older = _received(db, "<static@sender>", subject="Tourenplan KW41", date=SENT - timedelta(days=7))
+    newer = _received(db, "<static@sender>", subject="Tourenplan KW42", date=SENT)
+    later = _received(db, "<static@sender>", subject="Tourenplan KW43", date=SENT + timedelta(days=7))
+    reply = _reply(db, "<r@test>", in_reply_to="<static@sender>")
+
+    reply_tracking.update_statuses_from_replies(db, primary_account())
+
+    assert haiku.calls == [(newer.id, reply.id, True)]
+    assert older.status is None and later.status is None

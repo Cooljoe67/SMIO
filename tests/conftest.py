@@ -36,6 +36,7 @@ _stub(
     model_available=lambda folder_list: True,
     ensure_loaded=lambda folder_list="default": None,
     reload_model=lambda folder_list="default": None,
+    reload_models=lambda: ["default"],
 )
 _stub(
     "src.ai.ner",

@@ -45,9 +45,18 @@ def _thread_target(db, account, reply):
     # In-Reply-To first, then References from the newest to the oldest.
     answered = [reply.in_reply_to] + list(reversed((reply.reference_ids or "").split()))
     for message_id in filter(None, dict.fromkeys(answered)):
-        for candidate in emails.filter(Email.message_id == message_id).all():
-            if not _is_own(candidate, account):
-                return candidate
+        candidates = [
+            candidate
+            for candidate in emails.filter(Email.message_id == message_id).order_by(Email.date.desc())
+            if not _is_own(candidate, account)
+        ]
+        # A reused Message-ID can stand for several mails: take the newest one the
+        # reply can answer, i.e. not dated after it.
+        earlier = [
+            c for c in candidates if reply.date is None or c.date is None or c.date <= reply.date
+        ]
+        if earlier or candidates:
+            return (earlier or candidates)[0]
     # Applies once case_ref is filled for mailbox mail; today only imported rows have it.
     if reply.case_ref:
         candidates = emails.filter(
@@ -126,6 +135,8 @@ def update_statuses_from_replies(db, account):
             if error.kind == "fatal":
                 # Key, credit or model problem: every reply waits until it is fixed.
                 logger.error("Status checks for account %s stopped: %s", account.id, error)
+                # Reported so the five-minute job answers 500 until it is fixed.
+                result["stopped"] = f"fatal: {error}"
                 break
             logger.warning("Status check for reply %s failed: %s", reply.id, error)
             if error.kind == "retryable":

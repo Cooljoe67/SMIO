@@ -112,6 +112,17 @@ at `http://localhost:8080`. Configure
 Cloud Run environment variables through Secret Manager or service configuration; do
 not add `.env` to the image.
 
+The bundled `config/smio.yaml` reads the IMAP password from Secret Manager
+(`password_secret`), which a local container cannot do without Google credentials.
+For a local container, mount a config whose account uses `password: ${IMAP_PASSWORD}`
+instead and point `SMIO_CONFIG_PATH` at it:
+
+```bash
+docker run --rm -p 8080:8080 --env-file .env \
+  -v "$PWD/smio.local.yaml:/app/config/smio.local.yaml:ro" \
+  -e SMIO_CONFIG_PATH=/app/config/smio.local.yaml smio:local
+```
+
 ### Local operation without Google Cloud
 
 Google Cloud Storage is optional. For a local PC or Raspberry Pi, leave

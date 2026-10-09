@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from src.config import resolve_account
 from src.db.database import get_db
+from ..dependencies import requested_account
 from ..utils.inbox_processor import (
     MAX_UNDO_BATCHES,
     process_unprocessed_emails,
@@ -13,8 +13,8 @@ router = APIRouter(prefix="/inbox", tags=["Inbox"])
 
 
 @router.post("/process_unprocessed")
-def process_unprocessed(account: str | None = None, db: Session = Depends(get_db)):
-    batch_id, results, errors = process_unprocessed_emails(db, resolve_account(account))
+def process_unprocessed(account=Depends(requested_account), db: Session = Depends(get_db)):
+    batch_id, results, errors = process_unprocessed_emails(db, account)
     return {
         "batch_id": batch_id,
         "processed": len(results),
@@ -28,10 +28,10 @@ def process_unprocessed(account: str | None = None, db: Session = Depends(get_db
 @router.post("/undo_last_processing")
 def undo_processing(
     count: int = Query(1, ge=1, le=MAX_UNDO_BATCHES),
-    account: str | None = None,
+    account=Depends(requested_account),
     db: Session = Depends(get_db),
 ):
-    batch_ids, restored, errors = undo_processing_batches(db, resolve_account(account), count)
+    batch_ids, restored, errors = undo_processing_batches(db, account, count)
     return {
         "batch_ids": batch_ids,
         "restored": len(restored),
