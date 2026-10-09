@@ -48,7 +48,8 @@ def _run_exclusively(name, routine):
 
 
 def _process_account(account, is_primary):
-    fetch_result = fetch_inbox(account)
+    # Only the count: the result is returned as JSON and the mails are ORM objects.
+    fetched = len(fetch_inbox(account))
     instruction_result = process_instruction_mails(account, is_primary=is_primary)
 
     db = SessionLocal()
@@ -59,7 +60,7 @@ def _process_account(account, is_primary):
         db.close()
 
     return {
-        "fetch": fetch_result,
+        "fetched": fetched,
         "instructions": instruction_result,
         "batch_id": batch_id,
         "processed": len(results),
