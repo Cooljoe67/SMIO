@@ -3,9 +3,10 @@ import os
 import re
 from datetime import date, datetime, timedelta, timezone
 
-from imap_tools import AND, H, MailBox
+from imap_tools import AND, H, MailBox, MailboxLoginError
 from src.db.database import SessionLocal
 from src.db.models import Email
+from src.storage import secret_store
 
 from .mail_identity import fingerprint, is_same_mail, normalized_date
 from .folder_rules import (
@@ -31,11 +32,24 @@ def open_mailbox(account):
         raise NotImplementedError(
             f"Account {account.id!r}: provider {account.provider!r} is not supported yet"
         )
-    if not account.imap.password:
-        raise RuntimeError(
-            f"Account {account.id!r}: no IMAP password; set the variable its config refers to"
-        )
-    return MailBox(account.imap.host).login(account.imap.username, account.imap.password)
+    imap = account.imap
+    if imap.password_secret is None:
+        if not imap.password:
+            raise RuntimeError(
+                f"Account {account.id!r}: no IMAP password; set the variable its config refers to"
+            )
+        return MailBox(imap.host).login(imap.username, imap.password)
+
+    password = secret_store.read_secret(imap.password_secret)
+    try:
+        return MailBox(imap.host).login(imap.username, password)
+    except MailboxLoginError:
+        # The password may have been rotated since it was cached.
+        secret_store.invalidate(imap.password_secret)
+        current = secret_store.read_secret(imap.password_secret)
+        if current == password:
+            raise
+        return MailBox(imap.host).login(imap.username, current)
 
 
 def _header(message, name):

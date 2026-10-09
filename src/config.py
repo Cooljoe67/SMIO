@@ -4,7 +4,7 @@ The deployed service reads GCS_CONFIG_OBJECT from GCS on every reload, so
 production changes (e.g. switching a folder off) apply on the next workflow
 run without a redeploy; the file in the image is only the initial upload and
 the fallback. Scripts and local runs read the checked-out file. Secrets are
-referenced as ${ENV_VAR}.
+referenced as ${ENV_VAR} or, read at login, by Secret Manager name (*_secret).
 """
 
 import logging
@@ -53,22 +53,49 @@ class MailboxLayout(_Strict):
     sent: Optional[str] = None
 
 
+def _one_source(connection, field):
+    """A credential is given either itself or as <field>_secret, the name of a
+    Secret Manager secret read at login."""
+    if (getattr(connection, field) is None) == (getattr(connection, f"{field}_secret") is None):
+        raise ValueError(f"set exactly one of '{field}' and '{field}_secret'")
+
+
 class ImapConnection(_Strict):
     host: str
     username: str
-    password: str
+    password: Optional[str] = None
+    password_secret: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _one_password(self):
+        _one_source(self, "password")
+        return self
 
 
 class GmailConnection(_Strict):
     client_id: str
-    client_secret: str
-    refresh_token: str
+    client_secret: Optional[str] = None
+    client_secret_secret: Optional[str] = None
+    refresh_token: Optional[str] = None
+    refresh_token_secret: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _one_source_each(self):
+        _one_source(self, "client_secret")
+        _one_source(self, "refresh_token")
+        return self
 
 
 class ExchangeConnection(_Strict):
     tenant_id: str
     client_id: str
-    client_secret: str
+    client_secret: Optional[str] = None
+    client_secret_secret: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _one_client_secret(self):
+        _one_source(self, "client_secret")
+        return self
 
 
 class Account(_Strict):

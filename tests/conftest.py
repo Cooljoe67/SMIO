@@ -52,6 +52,14 @@ _stub(
 )
 
 
+@pytest.fixture(autouse=True)
+def offline_secrets(monkeypatch):
+    """The repository config reads the IMAP password from Secret Manager."""
+    from src.storage import secret_store
+
+    monkeypatch.setattr(secret_store, "_cache", {"imap-password": "secret"})
+
+
 @pytest.fixture
 def db():
     from src.db.models import Base
