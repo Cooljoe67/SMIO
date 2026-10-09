@@ -203,6 +203,8 @@ def _add_mails(engine, count, holdout=False):
             true_label=DEFAULT_LABELS[index % len(DEFAULT_LABELS)],
             text=f"{'holdout' if holdout else 'training'} mail {index}",
             is_eval_holdout=holdout,
+            # The holdout holds corrections; imported training data never stays in it.
+            classification_source="imap_folder" if holdout else None,
         )
         for index in range(count)
     )
@@ -346,12 +348,10 @@ def test_first_publish_has_nothing_to_archive(script, monkeypatch, tmp_path):
     assert bucket.objects == {"models/distilbert_deployed/model.safetensors": b"new"}
 
 
-def test_training_input_matches_the_list_default(db, script):
+def test_training_input_includes_subject_and_sender_domain(db, script):
     db.add(Email(folder_list="logistics", true_label="other", subject="Rechnung", sender="a@b.de", text="x"))
     db.commit()
     ids = script.label_ids("logistics")
 
-    assert script.default_input_format("default") == "body"
-    assert script.default_input_format("logistics") == "subject_sender_body"
     texts, _, _, _ = script.load_data(db, "logistics", ids, input_format="subject_sender_body")
     assert texts == ["Rechnung\nb.de\nx"]

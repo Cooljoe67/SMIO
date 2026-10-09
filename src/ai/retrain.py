@@ -29,6 +29,7 @@ from transformers import (
 
 from src.ai import classifier
 from src.ai.labels import ID2LABEL, LABEL2ID
+from src.ai.model_input import CONFIG_KEY, SUBJECT_SENDER_BODY, build_input
 from src.ai.promotion_rules import (
     PROMOTION_BOOTSTRAP_SAMPLES,
     PROMOTION_F1_NONINFERIORITY_MARGIN,
@@ -60,6 +61,9 @@ REPLAY_RATIO = 0.9
 # so the hold-out set stays representative of real, evolving mail patterns.
 HOLDOUT_RATIO = 0.15
 NUM_TRAIN_EPOCHS = 3
+# Input format candidates are trained on; the deployed model keeps its own until
+# a candidate in the new format passes the promotion check.
+CANDIDATE_INPUT_FORMAT = SUBJECT_SENDER_BODY
 BATCH_SIZE = 16
 
 
@@ -353,10 +357,17 @@ def _classification_metrics(labels, predictions):
     }
 
 
-def _deployed_model_predictions(eval_texts):
-    """Predict the fixed holdout with the currently deployed classifier."""
+def _model_inputs(emails, input_format=CANDIDATE_INPUT_FORMAT):
+    return [
+        build_input(input_format, email.subject, email.sender, email.text)
+        for email in emails
+    ]
+
+
+def _deployed_model_predictions(holdout_emails):
+    """Predict the fixed holdout with the deployed classifier, in its own input format."""
     return np.asarray(
-        [LABEL2ID[classifier.predict_text(text)[0]] for text in eval_texts],
+        [LABEL2ID[classifier.predict_email(email)[0]] for email in holdout_emails],
         dtype=np.int64,
     )
 
@@ -457,9 +468,8 @@ def _promotion_assessment(labels, baseline_predictions, candidate_predictions):
 
 def _load_holdout(db):
     holdout_emails = _model_emails(db).filter(Email.is_eval_holdout.is_(True)).all()
-    texts = [email.text or "" for email in holdout_emails]
     labels = [LABEL2ID[email.true_label] for email in holdout_emails]
-    return texts, labels
+    return holdout_emails, labels
 
 
 def _append_retraining_result_notice(result):
@@ -526,8 +536,8 @@ def retrain_if_due(db, min_corrections=MIN_CORRECTIONS):
         # A forced RETRAIN right after deploy: nothing new to learn from.
         return {"retrained": False, "reason": "no_corrections", "pending_corrections": 0}
 
-    eval_texts, eval_labels = _load_holdout(db)
-    if not eval_texts:
+    holdout_emails, eval_labels = _load_holdout(db)
+    if not holdout_emails:
         logger.warning(
             "Retrain skipped: no eval hold-out configured yet, "
             "run scripts/bootstrap_eval_holdout.py first"
@@ -543,14 +553,16 @@ def retrain_if_due(db, min_corrections=MIN_CORRECTIONS):
     dataset_emails, batch_sizes = build_replay_batch(db, train_emails)
     if not dataset_emails:
         return {"retrained": False, "reason": "no_training_data", "pending_corrections": len(corrections)}
-    train_texts = [email.text or "" for email in dataset_emails]
+    train_texts = _model_inputs(dataset_emails)
     train_labels = [LABEL2ID[email.true_label] for email in dataset_emails]
 
     tokenizer = DistilBertTokenizerFast.from_pretrained(MODEL_DIR)
     model = DistilBertForSequenceClassification.from_pretrained(MODEL_DIR)
+    # Saved into config.json, so the promoted model is fed what it was trained on.
+    setattr(model.config, CONFIG_KEY, CANDIDATE_INPUT_FORMAT)
 
     train_ds = _EmailDataset(_tokenize(tokenizer, train_texts), train_labels)
-    eval_ds = _EmailDataset(_tokenize(tokenizer, eval_texts), eval_labels)
+    eval_ds = _EmailDataset(_tokenize(tokenizer, _model_inputs(holdout_emails)), eval_labels)
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     candidate_dir = Path(f"./models/distilbert_candidate_{timestamp}")
@@ -577,7 +589,7 @@ def retrain_if_due(db, min_corrections=MIN_CORRECTIONS):
     evaluation = trainer.predict(eval_ds)
     training_duration = time.perf_counter() - training_started_at
     candidate_predictions = np.argmax(evaluation.predictions, axis=1)
-    baseline_predictions = _deployed_model_predictions(eval_texts)
+    baseline_predictions = _deployed_model_predictions(holdout_emails)
     promotion_assessment = _promotion_assessment(
         eval_labels,
         baseline_predictions,
@@ -658,7 +670,7 @@ def retrain_if_due(db, min_corrections=MIN_CORRECTIONS):
         "batch_sizes": batch_sizes,
         "corrections_used": len(train_emails),
         "new_holdout_count": len(new_holdout_emails),
-        "eval_holdout_size": len(eval_texts),
+        "eval_holdout_size": len(holdout_emails),
         "candidate_dir": str(candidate_dir) if promoted else None,
         "replaced_model_archive": replaced_model_archive,
     }

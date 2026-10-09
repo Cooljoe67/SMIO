@@ -239,3 +239,23 @@ def test_forced_retrain_without_corrections_is_a_clean_no_op(db, retrain):
     result = retrain.retrain_if_due(db, min_corrections=0)
 
     assert result == {"retrained": False, "reason": "no_corrections", "pending_corrections": 0}
+
+
+def test_candidates_see_subject_and_sender_domain(retrain):
+    mail = Email(subject="Rechnung", sender="Anna <anna@kunde.de>", text="Hallo")
+
+    assert retrain._model_inputs([mail]) == ["Rechnung\nkunde.de\nHallo"]
+
+
+def test_deployed_model_is_scored_in_its_own_input_format(monkeypatch, retrain):
+    mails = [Email(subject="s", sender="a@b.de", text="x")]
+    seen = []
+
+    def predict_email(email, folder_list="default"):
+        seen.append(email)
+        return "tech", 0.9
+
+    monkeypatch.setattr(retrain.classifier, "predict_email", predict_email, raising=False)
+
+    assert retrain._deployed_model_predictions(mails).tolist() == [retrain.LABEL2ID["tech"]]
+    assert seen == mails

@@ -155,11 +155,6 @@ def label_ids(folder_list):
     return {label: index for index, label in enumerate(labels)}
 
 
-def default_input_format(folder_list):
-    # retrain.py fine-tunes the default model on bodies, so it keeps that format.
-    return BODY if folder_list == DEFAULT_FOLDER_LIST else SUBJECT_SENDER_BODY
-
-
 def load_data(db, folder_list, label2id, holdout=False, input_format=BODY):
     """Texts, label ids, case groups and ids of the mails labelled for the folder list.
 
@@ -432,8 +427,9 @@ def parse_args():
     parser.add_argument(
         "--input",
         choices=INPUT_FORMATS,
-        help="what the model sees (default: body for the default list, otherwise "
-        "subject, sender domain and body); stored with the model",
+        default=SUBJECT_SENDER_BODY,
+        help="what the model sees (default: subject, sender domain and body, as in "
+        "retraining); stored with the model",
     )
     parser.add_argument(
         "--metric",
@@ -448,7 +444,6 @@ def parse_args():
 
 def main():
     options = parse_args()
-    options.input = options.input or default_input_format(options.folder_list)
     if options.publish and not gcs.enabled():
         # Fail now rather than after hours of training.
         raise SystemExit("--publish needs GCS, but GCS_BUCKET is not set; nothing was trained.")
