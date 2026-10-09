@@ -96,6 +96,9 @@ def move_email_to_classification_folder(mailbox, email, account):
     if destination is None:
         return None
     source_folder = email.folder or inbox_folder(account)
+    if source_folder == destination:
+        # Already there; a MOVE within one folder would only renumber it.
+        return None
     if _verify_uid(mailbox, email, source_folder) is None:
         raise ValueError(f"Email {email.id} is no longer in {source_folder}")
 
@@ -300,7 +303,16 @@ def _sync_message(
 
     folder_classification = classification_for_folder(folder_name, account)
     previous_folder_classification = classification_for_folder(previous_folder or "", account)
-    if (
+    if not new_email and folder_classification and int(email_obj.processed or 0) <= 0:
+        # Filed by the user before SMIO processed it: the folder is the label.
+        # No processing batch, so undo leaves it where the user put it.
+        email_obj.processed = 1
+        email_obj.processed_at = sync_timestamp
+        email_obj.classification = folder_classification
+        email_obj.true_label = folder_classification
+        email_obj.classification_source = "imap_folder"
+        email_obj.folder_list = account.folder_list
+    elif (
         not new_email
         and folder_classification
         and previous_classification

@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from src.api.utils import imap_client, mailer
+from src.api.utils import imap_client, inbox_processor, mailer
 from src.api.utils.mail_identity import email_fingerprint, fingerprint, normalized_date
 from src.config import primary_account
 from src.db import database
@@ -154,6 +154,63 @@ def test_move_without_message_id_is_recognised_as_a_correction(db, server):
     assert email.removed_at is None
 
 
+def _predict(monkeypatch, mailbox, classification):
+    monkeypatch.setattr(inbox_processor, "open_mailbox", lambda account: mailbox)
+    monkeypatch.setattr(
+        inbox_processor.classifier, "predict_text", lambda text, folder_list: (classification, 0.9)
+    )
+
+
+def test_mail_filed_by_the_user_before_processing_keeps_the_users_label(db, server, monkeypatch):
+    mailbox = server(**{"INBOX": [_message("1")], "INBOX/delivery": [], "INBOX/tech": []})
+    _sync()  # Stays unprocessed, e.g. while the account has no model yet.
+    mailbox.move(["1"], "INBOX/delivery")
+    _sync()
+    _predict(monkeypatch, mailbox, "tech")
+
+    _, results, errors = inbox_processor.process_unprocessed_emails(db, primary_account())
+
+    email = db.query(Email).one()
+    assert (results, errors) == ([], [])
+    assert mailbox.moves == [("INBOX", "INBOX/delivery")]
+    assert (email.folder, email.classification, email.true_label, email.classification_source) == (
+        "INBOX/delivery", "delivery", "delivery", "imap_folder"
+    )
+    assert (email.processed, email.processing_batch) == (1, None)
+    assert email.processed_at is not None
+
+
+def test_processing_only_takes_mails_still_in_the_inbox(db, server, monkeypatch):
+    mailbox = server(**{
+        "INBOX": [_message("1")],
+        "INBOX/delivery": [_message("3", message_id="<filed@test>")],
+        "INBOX/tech": [],
+    })
+    inbox_mail = Email(account="primary", uid="1", message_id="<a@test>", folder="INBOX")
+    db.add_all([
+        inbox_mail,
+        Email(account="primary", uid="2", message_id="<gone@test>", folder="INBOX", removed_at=datetime(2026, 10, 8)),
+        Email(account="primary", uid="3", message_id="<filed@test>", folder="INBOX/delivery"),
+    ])
+    db.commit()
+    _predict(monkeypatch, mailbox, "tech")
+
+    _, results, errors = inbox_processor.process_unprocessed_emails(db, primary_account())
+
+    assert [result["email_id"] for result in results] == [inbox_mail.id]
+    assert errors == []
+    assert mailbox.moves == [("INBOX", "INBOX/tech")]
+
+
+def test_mail_already_in_its_folder_is_not_moved(db, server):
+    mailbox = server(**{"INBOX": [], "INBOX/tech": [_message("1")]})
+    email = Email(id=1, account="primary", uid="1", message_id="<a@test>", folder="INBOX/tech", classification="tech")
+
+    assert imap_client.move_email_to_classification_folder(mailbox, email, primary_account()) is None
+    assert mailbox.moves == []
+    assert email.uid == "1"
+
+
 def test_copy_in_inbox_and_folder_keeps_the_folder(db, server):
     server(**{
         "INBOX": [_message("1")],
@@ -165,7 +222,8 @@ def test_copy_in_inbox_and_folder_keeps_the_folder(db, server):
 
     email = db.query(Email).one()
     assert email.folder == "INBOX/delivery"
-    assert email.true_label is None
+    # Filed before SMIO processed it: the folder is the label, not "other" from the inbox copy.
+    assert email.true_label == "delivery"
     assert email.removed_at is None
 
 
