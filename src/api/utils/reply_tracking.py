@@ -1,6 +1,8 @@
 """Updates the status of a mail when a reply in its thread arrives or is sent.
 
-Replies are linked through In-Reply-To/References, or else the case reference.
+Replies are linked through In-Reply-To/References, or else the case reference
+once case_ref is filled. Today only imported training rows have one, and those
+are never linked, so mailbox mail is linked through the headers alone.
 The status belongs to the received mail the thread is about, so the walk skips
 the account's own sent mails. A status set by the user is never overwritten;
 the reply then only leaves a suggestion.
@@ -46,6 +48,7 @@ def _thread_target(db, account, reply):
         for candidate in emails.filter(Email.message_id == message_id).all():
             if not _is_own(candidate, account):
                 return candidate
+    # Applies once case_ref is filled for mailbox mail; today only imported rows have it.
     if reply.case_ref:
         candidates = emails.filter(
             Email.case_ref == reply.case_ref,

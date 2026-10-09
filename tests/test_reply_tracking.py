@@ -159,12 +159,25 @@ def test_their_answer_to_our_reply_updates_the_original_mail(db, haiku):
 
 
 def test_case_reference_links_mails_without_thread_headers(db, haiku):
+    # Set by hand: nothing fills case_ref for mailbox mail yet.
     original = _received(db, "<orig@test>", case_ref="VG:NOR-1")
     later = _reply(db, "<later@test>", outbound=False, case_ref="VG:NOR-1")
 
     reply_tracking.update_statuses_from_replies(db, primary_account())
 
     assert haiku.calls == [(original.id, later.id, False)]
+
+
+def test_imported_rows_with_a_case_reference_are_never_linked(db, haiku):
+    # Today only imported training rows carry case_ref; they are neither replies nor targets.
+    _received(db, "<imported@test>", case_ref="VG:NOR-1", is_training_data=True)
+    imported_reply = _reply(db, "<imported-reply@test>", outbound=False, case_ref="VG:NOR-1", is_training_data=True)
+    mailbox_reply = _reply(db, "<later@test>", outbound=False, case_ref="VG:NOR-1")
+
+    result = reply_tracking.update_statuses_from_replies(db, primary_account())
+
+    assert result["unlinked"] == 1 and haiku.calls == []
+    assert mailbox_reply.reply_checked_at is not None and imported_reply.reply_checked_at is None
 
 
 def test_replies_to_smio_mails_are_not_checked(db, haiku):
