@@ -344,3 +344,14 @@ def test_first_publish_has_nothing_to_archive(script, monkeypatch, tmp_path):
     _publish(script, monkeypatch, tmp_path, bucket)
 
     assert bucket.objects == {"models/distilbert_deployed/model.safetensors": b"new"}
+
+
+def test_training_input_matches_the_list_default(db, script):
+    db.add(Email(folder_list="logistics", true_label="other", subject="Rechnung", sender="a@b.de", text="x"))
+    db.commit()
+    ids = script.label_ids("logistics")
+
+    assert script.default_input_format("default") == "body"
+    assert script.default_input_format("logistics") == "subject_sender_body"
+    texts, _, _, _ = script.load_data(db, "logistics", ids, input_format="subject_sender_body")
+    assert texts == ["Rechnung\nb.de\nx"]

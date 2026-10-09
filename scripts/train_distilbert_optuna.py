@@ -52,6 +52,13 @@ from transformers.modeling_outputs import SequenceClassifierOutput
 
 from src.ai.classifier import DEFAULT_FOLDER_LIST, model_location
 from src.ai.labels import LABEL2ID as DEFAULT_LABEL2ID
+from src.ai.model_input import (
+    BODY,
+    CONFIG_KEY as MODEL_INPUT_KEY,
+    INPUT_FORMATS,
+    SUBJECT_SENDER_BODY,
+    build_input,
+)
 from src.config import get_config
 from src.db.database import SessionLocal, engine, ensure_email_columns
 from src.db.models import Base, Email
@@ -148,7 +155,12 @@ def label_ids(folder_list):
     return {label: index for index, label in enumerate(labels)}
 
 
-def load_data(db, folder_list, label2id, holdout=False):
+def default_input_format(folder_list):
+    # retrain.py fine-tunes the default model on bodies, so it keeps that format.
+    return BODY if folder_list == DEFAULT_FOLDER_LIST else SUBJECT_SENDER_BODY
+
+
+def load_data(db, folder_list, label2id, holdout=False, input_format=BODY):
     """Texts, label ids, case groups and ids of the mails labelled for the folder list.
 
     Without holdout these are the training mails; with it the permanent eval
@@ -163,7 +175,7 @@ def load_data(db, folder_list, label2id, holdout=False):
     if unknown:
         raise ValueError(f"Labels not in folder list {folder_list!r}: {dict(unknown)}")
 
-    texts = [email.text or "" for email in emails]
+    texts = [build_input(input_format, email.subject, email.sender, email.text) for email in emails]
     labels = [label2id[email.true_label] for email in emails]
     # Mails without a case are their own group.
     groups = [email.case_ref or f"mail-{email.id}" for email in emails]
@@ -418,6 +430,12 @@ def parse_args():
     parser.add_argument("--trials", type=int, default=N_TRIALS)
     parser.add_argument("--base-model", default=BASE_MODEL)
     parser.add_argument(
+        "--input",
+        choices=INPUT_FORMATS,
+        help="what the model sees (default: body for the default list, otherwise "
+        "subject, sender domain and body); stored with the model",
+    )
+    parser.add_argument(
         "--metric",
         choices=("macro", "weighted"),
         default="macro",
@@ -430,6 +448,7 @@ def parse_args():
 
 def main():
     options = parse_args()
+    options.input = options.input or default_input_format(options.folder_list)
     if options.publish and not gcs.enabled():
         # Fail now rather than after hours of training.
         raise SystemExit("--publish needs GCS, but GCS_BUCKET is not set; nothing was trained.")
@@ -445,9 +464,11 @@ def main():
     )
     db = SessionLocal()
     try:
-        texts, labels, groups, ids = load_data(db, options.folder_list, label2id)
+        texts, labels, groups, ids = load_data(
+            db, options.folder_list, label2id, input_format=options.input
+        )
         holdout_texts, holdout_labels, _, _ = load_data(
-            db, options.folder_list, label2id, holdout=True
+            db, options.folder_list, label2id, holdout=True, input_format=options.input
         )
     finally:
         db.close()
@@ -477,7 +498,7 @@ def main():
         direction="maximize",
         study_name=(
             f"distilbert_{options.folder_list}_{options.metric}_cv{options.folds}_"
-            f"{options.base_model.replace('/', '-')}_{fingerprint}"
+            f"{options.base_model.replace('/', '-')}_{options.input}_{fingerprint}"
         ),
         storage=STUDY_STORAGE,
         load_if_exists=True,
@@ -515,6 +536,8 @@ def main():
     final_model.config.architectures = ["DistilBertForSequenceClassification"]
     deploy_dir, gcs_prefix = model_location(options.folder_list)
     deploy_dir.mkdir(parents=True, exist_ok=True)
+    # The classifier builds its input from this, the same way as above.
+    setattr(final_model.config, MODEL_INPUT_KEY, options.input)
     final_model.save_pretrained(deploy_dir)
     tokenizer.save_pretrained(deploy_dir)
     print(f"\nModel ({num_epochs} epochs, {len(texts)} mails) saved to: {deploy_dir}")

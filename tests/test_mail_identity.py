@@ -157,7 +157,7 @@ def test_move_without_message_id_is_recognised_as_a_correction(db, server):
 def _predict(monkeypatch, mailbox, classification):
     monkeypatch.setattr(inbox_processor, "open_mailbox", lambda account: mailbox)
     monkeypatch.setattr(
-        inbox_processor.classifier, "predict_text", lambda text, folder_list: (classification, 0.9)
+        inbox_processor.classifier, "predict_email", lambda email, folder_list: (classification, 0.9)
     )
 
 

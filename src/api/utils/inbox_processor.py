@@ -61,7 +61,7 @@ def process_email_by_id(email_id: int, db: Session, account, batch_id: int = Non
             }
 
         # 2. Classification
-        classification, confidence = classifier.predict_text(email.text, account.folder_list)
+        classification, confidence = classifier.predict_email(email, account.folder_list)
         amazon_status = amazon_sender_status(
             email.sender,
             email.subject,

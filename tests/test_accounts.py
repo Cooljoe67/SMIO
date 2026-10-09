@@ -152,8 +152,8 @@ def test_processing_uses_the_accounts_folder_list_and_layout(db, accounts, mailb
     calls = []
     monkeypatch.setattr(
         inbox_processor.classifier,
-        "predict_text",
-        lambda text, folder_list: calls.append(folder_list) or ("delivery", 0.9),
+        "predict_email",
+        lambda email, folder_list: calls.append(folder_list) or ("delivery", 0.9),
     )
     _email(db, first, None, "INBOX", processed=0)
     mail = _email(db, second, None, "Inbox", processed=0, uid="7")

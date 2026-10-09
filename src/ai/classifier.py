@@ -12,6 +12,7 @@ import torch
 from transformers import DistilBertForSequenceClassification, DistilBertTokenizerFast
 
 from src.ai.labels import ID2LABEL
+from src.ai.model_input import build_input, model_input_format
 from src.config import get_config
 from src.storage import gcs
 
@@ -80,7 +81,7 @@ def _load(folder_list):
     )
     model = DistilBertForSequenceClassification.from_pretrained(local_model)
     model.eval()
-    return tokenizer, model, _labels(folder_list, model)
+    return tokenizer, model, _labels(folder_list, model), model_input_format(model.config)
 
 
 def _get(folder_list):
@@ -110,8 +111,17 @@ def reload_model(folder_list=DEFAULT_FOLDER_LIST):
         _models[folder_list] = loaded
 
 
+def predict_email(email, folder_list=DEFAULT_FOLDER_LIST):
+    """Label and confidence of a mail, built in the input format the model was trained on."""
+    input_format = _get(folder_list)[3]
+    return predict_text(
+        build_input(input_format, email.subject, email.sender, email.text), folder_list
+    )
+
+
 def predict_text(text, folder_list=DEFAULT_FOLDER_LIST):
-    tokenizer, model, id2label = _get(folder_list)
+    """Label and confidence of an already built model input."""
+    tokenizer, model, id2label, _ = _get(folder_list)
     inputs = tokenizer(
         text or "",
         return_tensors="pt",
