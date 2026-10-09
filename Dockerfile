@@ -10,12 +10,14 @@ WORKDIR /app
 COPY requirements-runtime.txt .
 RUN pip install --no-cache-dir -r requirements-runtime.txt
 
-COPY src ./src
-COPY config ./config
-
 RUN useradd --create-home --uid 10001 smio \
     && mkdir -p /app/models \
     && chown smio:smio /app /app/models
+
+COPY src ./src
+# Owned by the service user only as a safeguard: the config from GCS is read
+# into memory and never written over this bundled copy.
+COPY --chown=smio:smio config ./config
 USER smio
 
 EXPOSE 8080

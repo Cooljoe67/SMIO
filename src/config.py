@@ -1,8 +1,10 @@
 """Folder lists and mail accounts, loaded from config/smio.yaml.
 
-When GCS is enabled the file is downloaded from GCS_CONFIG_OBJECT on every
-reload, so production changes (e.g. switching a folder off) apply on the next
-workflow run without a redeploy. Secrets are referenced as ${ENV_VAR}.
+The deployed service reads GCS_CONFIG_OBJECT from GCS on every reload, so
+production changes (e.g. switching a folder off) apply on the next workflow
+run without a redeploy; the file in the image is only the initial upload and
+the fallback. Scripts and local runs read the checked-out file. Secrets are
+referenced as ${ENV_VAR}.
 """
 
 import logging
@@ -150,12 +152,39 @@ def parse_config(text):
     return SmioConfig.model_validate(_expand_env(yaml.safe_load(text) or {}))
 
 
-def _sync_from_gcs():
-    if not gcs.enabled():
-        return
-    if not gcs.download_file(CONFIG_GCS_OBJECT, CONFIG_PATH):
-        logger.info("No config in GCS at %s; uploading the local one", CONFIG_GCS_OBJECT)
+def _reads_from_gcs():
+    """Only the deployed service reads GCS; scripts and local runs use their file."""
+    service = os.getenv("K_SERVICE") or os.getenv("SMIO_CONFIG_SOURCE") == "gcs"
+    return bool(service) and gcs.enabled()
+
+
+def _gcs_config_text():
+    """The service's config from GCS, or None to use the bundled file.
+
+    Kept in memory: the bundled file is read-only in the image and stays the
+    initial upload and the fallback.
+    """
+    if not _reads_from_gcs():
+        return None
+    text = gcs.download_text(CONFIG_GCS_OBJECT)
+    if text is None:
+        logger.info("No config in GCS at %s; uploading the bundled one", CONFIG_GCS_OBJECT)
         gcs.upload_file(CONFIG_PATH, CONFIG_GCS_OBJECT)
+    return text
+
+
+def _load_config(startup):
+    text = _gcs_config_text()
+    try:
+        return parse_config(text if text is not None else CONFIG_PATH.read_text(encoding="utf-8"))
+    except (ValueError, yaml.YAMLError):
+        if text is None or not startup:
+            raise
+        # Nothing to keep yet: run on the bundled config rather than not at all.
+        logger.exception(
+            "Invalid SMIO config in GCS at %s; using the bundled %s", CONFIG_GCS_OBJECT, CONFIG_PATH
+        )
+        return parse_config(CONFIG_PATH.read_text(encoding="utf-8"))
 
 
 _config = None
@@ -163,12 +192,15 @@ _config_lock = Lock()
 
 
 def reload_config():
-    """Re-read the configuration (from GCS when enabled) and return it."""
+    """Re-read the configuration and return it.
+
+    A broken config keeps the previous one; at startup a broken GCS copy falls
+    back to the bundled file.
+    """
     global _config
     with _config_lock:
         try:
-            _sync_from_gcs()
-            _config = parse_config(CONFIG_PATH.read_text(encoding="utf-8"))
+            _config = _load_config(startup=_config is None)
         except Exception:
             if _config is None:
                 raise

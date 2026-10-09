@@ -44,6 +44,17 @@ def download_file(object_name, destination):
     return True
 
 
+def download_text(object_name):
+    """An object's content as text, or None if it does not exist in GCS."""
+    if not enabled():
+        return None
+
+    blob = _bucket().blob(object_name)
+    if not blob.exists():
+        return None
+    return blob.download_as_text(encoding="utf-8")
+
+
 def upload_file(source, object_name):
     if not enabled():
         return False

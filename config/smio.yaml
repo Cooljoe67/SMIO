@@ -1,8 +1,10 @@
 # SMIO configuration: folder lists and mail accounts.
 #
-# In production this file is read from GCS (GCS_CONFIG_OBJECT, default
+# The deployed service reads this file from GCS (GCS_CONFIG_OBJECT, default
 # config/smio.yaml) at the start of every workflow run, so changes apply
-# without a redeploy. This copy is the local default and the initial upload.
+# without a redeploy. This copy is what scripts and local runs use, the
+# initial upload, and the service's fallback if the GCS copy is invalid when
+# it starts.
 #
 # Never put secrets here. Use ${ENV_VAR} (or ${ENV_VAR:-default}) to read
 # values from the environment / .env instead.
