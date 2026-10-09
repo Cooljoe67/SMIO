@@ -98,6 +98,11 @@ def model_available(folder_list):
     return True
 
 
+def ensure_loaded(folder_list=DEFAULT_FOLDER_LIST):
+    """Load a list's model, syncing its directory from GCS, before code reads that directory."""
+    _get(folder_list)
+
+
 def reload_model(folder_list=DEFAULT_FOLDER_LIST):
     """Reload a list's model, e.g. after a promoted retrain run."""
     loaded = _load(folder_list)
