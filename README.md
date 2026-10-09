@@ -357,6 +357,7 @@ GCP_PROJECT_ID=your-google-cloud-project-id
 GCP_REGION=your-cloud-run-and-artifact-region
 # Optional; defaults to GCP_REGION.
 GCP_SCHEDULER_LOCATION=your-cloud-scheduler-region
+# Also points local SMIO processes at production data; see the note below.
 GCS_BUCKET=your-gcs-bucket
 
 # IMAP (required; referenced as ${IMAP_...} from config/smio.yaml)
@@ -388,8 +389,11 @@ GCS like the service). An invalid GCS edit keeps the previous config; if the ser
 starts with an invalid GCS copy it runs on the bundled file. Errors are logged.
 
 `.env` is loaded by every SMIO process, so a `GCS_BUCKET` there also makes local
-scripts and a local server download and upload the production database and models.
-Keep it out of `.env` on machines that run SMIO locally against their own `smio.db`.
+scripts and a local server download and upload the production database and models:
+each start replaces the local `smio.db` with the production copy, so rows imported
+by one script are gone when the next one starts. Keep it out of `.env` on machines
+that run SMIO locally against their own `smio.db`, and pass `-GcsBucket` to
+`deploy.ps1` and `add_account.ps1` there instead.
 
 ### Mail accounts and credentials
 
