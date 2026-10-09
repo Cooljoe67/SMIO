@@ -116,6 +116,16 @@ def restore_previous_model():
     if not gcs.enabled():
         return {"restored": False, "reason": "gcs_disabled"}
 
+    # The model loads lazily, so after a cold start MODEL_DIR can still be empty;
+    # the live model must be on disk to be archived before it is overwritten.
+    try:
+        classifier.ensure_loaded()
+    except Exception:
+        # A live model that fails to load is what a restore repairs.
+        logger.exception("Could not load the deployed model before restoring")
+    if not _model_is_complete(MODEL_DIR):
+        return {"restored": False, "reason": "current_model_unavailable"}
+
     now = datetime.now(timezone.utc)
     _prune_model_archives(now)
     cutoff = now - MODEL_ARCHIVE_RETENTION
@@ -141,10 +151,9 @@ def restore_previous_model():
                 continue
 
             current_model = temporary_dir / "current-model"
-            if _model_is_complete(MODEL_DIR):
-                shutil.copytree(MODEL_DIR, current_model)
-                if _archive_current_model() is None:
-                    raise RuntimeError("Could not preserve the currently deployed model")
+            shutil.copytree(MODEL_DIR, current_model)
+            if _archive_current_model() is None:
+                raise RuntimeError("Could not preserve the currently deployed model")
 
             try:
                 if not gcs.upload_directory(archived_model, classifier.MODEL_GCS_PREFIX):
@@ -493,6 +502,10 @@ def _append_retraining_result_notice(result):
 
 
 def retrain_if_due(db, min_corrections=MIN_CORRECTIONS):
+    # Fine-tuning reads MODEL_DIR, which a fresh instance only has once the lazily
+    # loaded model synced from GCS; fail before any correction is moved to the holdout.
+    classifier.ensure_loaded()
+
     try:
         removed_archives = _prune_model_archives()
         if removed_archives:
