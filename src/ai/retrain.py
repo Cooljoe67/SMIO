@@ -85,7 +85,7 @@ def _model_is_complete(path):
 
 
 def _archive_current_model():
-    if not gcs.enabled() or not _model_is_complete(MODEL_DIR):
+    if not gcs.syncs() or not _model_is_complete(MODEL_DIR):
         return None
 
     archive_name = _model_archive_name()
@@ -96,7 +96,7 @@ def _archive_current_model():
 
 
 def _prune_model_archives(now=None):
-    if not gcs.enabled():
+    if not gcs.syncs():
         return 0
 
     now = now or datetime.now(timezone.utc)
@@ -113,7 +113,7 @@ def _prune_model_archives(now=None):
 
 def restore_previous_model():
     """Restore the newest complete deployed-model archive from the last week."""
-    if not gcs.enabled():
+    if not gcs.syncs():
         return {"restored": False, "reason": "gcs_disabled"}
 
     # The model loads lazily, so after a cold start MODEL_DIR can still be empty;
@@ -592,7 +592,7 @@ def retrain_if_due(db, min_corrections=MIN_CORRECTIONS):
     if promoted:
         try:
             replaced_model_archive = _archive_current_model()
-            if gcs.enabled() and replaced_model_archive is None:
+            if gcs.syncs() and replaced_model_archive is None:
                 raise RuntimeError("Could not archive the currently deployed model")
         except Exception:
             shutil.rmtree(candidate_dir, ignore_errors=True)

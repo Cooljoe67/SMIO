@@ -199,7 +199,7 @@ def _attempt_object(attempt_id):
 
 def _save_command_attempt(attempt_id, attempt):
     contents = json.dumps(attempt)
-    if not gcs.enabled():
+    if not gcs.syncs():
         LOCAL_PENDING_COMMANDS_DIR.mkdir(parents=True, exist_ok=True)
         (LOCAL_PENDING_COMMANDS_DIR / f"{attempt_id}.json").write_text(
             contents,
@@ -215,7 +215,7 @@ def _save_command_attempt(attempt_id, attempt):
 
 
 def _load_command_attempts():
-    if not gcs.enabled():
+    if not gcs.syncs():
         LOCAL_PENDING_COMMANDS_DIR.mkdir(parents=True, exist_ok=True)
         for path in LOCAL_PENDING_COMMANDS_DIR.glob("*.json"):
             yield path.stem, json.loads(path.read_text(encoding="utf-8"))
@@ -229,7 +229,7 @@ def _load_command_attempts():
 
 
 def _delete_command_attempt(attempt_id):
-    if gcs.enabled():
+    if gcs.syncs():
         gcs.delete_directory(f"{PENDING_COMMANDS_PREFIX}/{attempt_id}")
     else:
         (LOCAL_PENDING_COMMANDS_DIR / f"{attempt_id}.json").unlink(missing_ok=True)

@@ -1,3 +1,4 @@
+import atexit
 import json
 import os
 import threading
@@ -29,20 +30,19 @@ def _database_signature():
 
 
 def _syncs_with_gcs():
-    """Only the deployed service mirrors the database through GCS.
-
-    .env is loaded by every process, so GCS_BUCKET alone would make local scripts
-    replace ./smio.db with the production copy and upload their changes over it.
-    Set SMIO_DB_SOURCE=gcs to opt in locally (with the service idle).
-    """
-    service = os.getenv("K_SERVICE") or os.getenv("SMIO_DB_SOURCE") == "gcs"
-    return bool(service) and gcs.enabled() and USING_SQLITE
+    """Only the deployed service, or a local run with SMIO_GCS=1, mirrors the
+    database through GCS (see gcs.syncs)."""
+    return gcs.syncs() and USING_SQLITE
 
 
 if _syncs_with_gcs():
     if not gcs.download_file(DATABASE_GCS_OBJECT, DATABASE_PATH) and DATABASE_PATH.exists():
         gcs.upload_file(DATABASE_PATH, DATABASE_GCS_OBJECT)
     _published_signature = _database_signature()
+    if not os.getenv("K_SERVICE"):
+        # The service publishes after each workflow and request; an opted-in
+        # script publishes its changes when it ends.
+        atexit.register(lambda: persist_database())
 
 engine = create_engine(
     DATABASE_URL, connect_args={"check_same_thread": False} if USING_SQLITE else {}

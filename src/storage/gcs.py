@@ -14,6 +14,18 @@ def enabled():
     return bool(_bucket_name())
 
 
+def syncs():
+    """Whether runtime artifacts (database, config, models, command state) follow GCS.
+
+    Only the deployed service does (Cloud Run sets K_SERVICE), or a local run
+    that opts in with SMIO_GCS=1 while the service is idle. .env is loaded by
+    every process, so GCS_BUCKET alone must not make local runs read or
+    overwrite production. Explicit tools (--publish, the database sync script)
+    use the bucket through enabled().
+    """
+    return enabled() and bool(os.getenv("K_SERVICE") or os.getenv("SMIO_GCS") == "1")
+
+
 def _bucket():
     bucket_name = _bucket_name()
     if not bucket_name:

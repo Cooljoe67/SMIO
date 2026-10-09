@@ -44,14 +44,14 @@ def _model_is_complete(path):
 def _sync_deployed_model(folder_list):
     """Use GCS when configured, seeding it only from a complete local model."""
     local_model, gcs_prefix = model_location(folder_list)
-    if gcs.enabled() and gcs.download_directory(gcs_prefix, local_model):
+    if gcs.syncs() and gcs.download_directory(gcs_prefix, local_model):
         return
     if not _model_is_complete(local_model):
         raise ModelMissingError(
             f"No classifier model for folder list {folder_list!r} "
             f"(GCS prefix {gcs_prefix!r}, local {str(local_model)!r})"
         )
-    if gcs.enabled():
+    if gcs.syncs():
         gcs.upload_directory(local_model, gcs_prefix)
 
 

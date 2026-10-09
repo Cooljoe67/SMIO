@@ -152,14 +152,14 @@ def test_sqlite_reads_leave_the_file_unchanged_and_writes_change_it(tmp_path, mo
 
 @pytest.mark.parametrize("service, source, expected", [
     ("smio", None, True),
-    (None, "gcs", True),
+    (None, "1", True),
     (None, None, False),
 ])
 def test_only_the_service_or_an_explicit_opt_in_syncs_the_database(
     uploads, monkeypatch, service, source, expected
 ):
     path, calls = uploads
-    for variable, value in (("K_SERVICE", service), ("SMIO_DB_SOURCE", source)):
+    for variable, value in (("K_SERVICE", service), ("SMIO_GCS", source)):
         if value:
             monkeypatch.setenv(variable, value)
         else:

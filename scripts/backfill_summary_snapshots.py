@@ -55,7 +55,7 @@ def main():
     # Never let a backfill commit upload the local copy to GCS. Set it empty rather
     # than removing it: load_dotenv would otherwise restore it from .env.
     os.environ["GCS_BUCKET"] = ""
-    os.environ.pop("SMIO_DB_SOURCE", None)
+    os.environ.pop("SMIO_GCS", None)
     os.environ["SQLITE_DB_PATH"] = str(db_path)
     os.environ.pop("DATABASE_URL", None)
     os.environ.setdefault("IMAP_HOST", "backfill.invalid")

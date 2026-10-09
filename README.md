@@ -384,19 +384,20 @@ Folder lists (one classifier model per list), per-folder on/off switches, retent
 The deployed service reads its copy from GCS (`GCS_CONFIG_OBJECT`) into memory at
 the start of every workflow run, so edits there apply without a redeploy; it uploads
 the bundled file only if the object does not exist. Scripts and local runs always
-use the checked-out file (set `SMIO_CONFIG_SOURCE=gcs` to make a local server read
-GCS like the service). An invalid GCS edit keeps the previous config; if the service
+use the checked-out file (see `SMIO_GCS` below). An invalid GCS edit keeps the previous config; if the service
 starts with an invalid GCS copy it runs on the bundled file, so accounts listed only
 in the GCS copy wait until it is fixed. Errors are logged.
 
 `.env` is loaded by every SMIO process, but only the deployed service (`K_SERVICE`
-set by Cloud Run) syncs the SQLite database and the config with GCS. Local scripts and
-a local server keep using `./smio.db` and the checked-out `config/smio.yaml` even with
-`GCS_BUCKET` in `.env`, which `deploy.ps1`, `add_account.ps1` and `--publish` need.
-To work on the production database locally, set `SMIO_DB_SOURCE=gcs` for that run, and
-only while the service is idle (scheduler paused): the run downloads the production
-copy at start and uploads its changes, overwriting whatever the service wrote meanwhile.
-`scripts/sync_database_with_gcs.py` is the guided way to do the same.
+set by Cloud Run) syncs its runtime state with GCS: the SQLite database, the config,
+the classifier and NER models, model archives and pending command state. Local scripts
+and a local server keep using `./smio.db`, the checked-out `config/smio.yaml` and the
+local `models/` even with `GCS_BUCKET` in `.env`, which `deploy.ps1`, `add_account.ps1`
+and `--publish` need. To run locally against production, set `SMIO_GCS=1` for that run,
+and only while the service is idle (scheduler paused): the run downloads the production
+state at start and uploads its database changes when it ends, overwriting whatever the
+service wrote meanwhile. `scripts/sync_database_with_gcs.py` is the guided way to edit
+the production database.
 
 ### Mail accounts and credentials
 

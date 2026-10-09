@@ -65,6 +65,7 @@ class FakeBucket:
 
     def install(self, monkeypatch, gcs):
         monkeypatch.setattr(gcs, "enabled", lambda: True)
+        monkeypatch.setenv("K_SERVICE", "smio")  # syncing with GCS is service behaviour
         for name in (
             "download_directory", "upload_directory", "list_directory_prefixes", "delete_directory",
         ):

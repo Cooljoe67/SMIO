@@ -84,11 +84,11 @@ def bucket(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "CONFIG_PATH", bundled)
     monkeypatch.setattr(config, "_config", None)
     monkeypatch.delenv("K_SERVICE", raising=False)
-    monkeypatch.delenv("SMIO_CONFIG_SOURCE", raising=False)
+    monkeypatch.delenv("SMIO_GCS", raising=False)
     return fake.objects
 
 
-@pytest.mark.parametrize("variable, value", [("K_SERVICE", "smio"), ("SMIO_CONFIG_SOURCE", "gcs")])
+@pytest.mark.parametrize("variable, value", [("K_SERVICE", "smio"), ("SMIO_GCS", "1")])
 def test_service_reads_the_gcs_config_without_writing_the_bundled_file(
     bucket, monkeypatch, variable, value
 ):

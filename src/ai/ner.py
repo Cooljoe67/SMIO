@@ -58,7 +58,7 @@ def _active_model_prefix():
 
 
 def _sync_model():
-    if not gcs.enabled():
+    if not gcs.syncs():
         return "local"
 
     active_prefix, revision = _active_model_prefix()

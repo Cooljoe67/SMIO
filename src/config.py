@@ -206,8 +206,7 @@ def parse_config(text):
 
 def _reads_from_gcs():
     """Only the deployed service reads GCS; scripts and local runs use their file."""
-    service = os.getenv("K_SERVICE") or os.getenv("SMIO_CONFIG_SOURCE") == "gcs"
-    return bool(service) and gcs.enabled()
+    return gcs.syncs()
 
 
 def _gcs_config_text():
