@@ -386,7 +386,8 @@ the start of every workflow run, so edits there apply without a redeploy; it upl
 the bundled file only if the object does not exist. Scripts and local runs always
 use the checked-out file (set `SMIO_CONFIG_SOURCE=gcs` to make a local server read
 GCS like the service). An invalid GCS edit keeps the previous config; if the service
-starts with an invalid GCS copy it runs on the bundled file. Errors are logged.
+starts with an invalid GCS copy it runs on the bundled file, so accounts listed only
+in the GCS copy wait until it is fixed. Errors are logged.
 
 `.env` is loaded by every SMIO process, so a `GCS_BUCKET` there also makes local
 scripts and a local server download and upload the production database and models:
@@ -398,10 +399,12 @@ that run SMIO locally against their own `smio.db`, and pass `-GcsBucket` to
 ### Mail accounts and credentials
 
 Each account has an `id` that its stored mails are keyed by. Never change it: a
-renamed account would import its inbox again as new mail. SMIO never uses a config
-that drops the id of stored mails: a running service keeps its previous config, a
-starting one falls back to the bundled file, and scripts and local runs stop with
-an error.
+renamed account would import its inbox again as new mail. A workflow run never
+switches to a config that drops the id of stored mails: it logs an error and keeps
+the previous config. A starting service rejects such a GCS copy the same way and
+runs on the bundled file instead, as it is: accounts added to the GCS copy only are
+not processed until the GCS copy is fixed, and the others keep running. Scripts use
+their checked-out file as it is.
 
 Credentials are never written into the config. Each one is either the name of a
 Google Secret Manager secret, read by SMIO when the account logs in, or a `${VAR}`
