@@ -36,9 +36,10 @@ def test_env_references_are_expanded_with_defaults():
     assert account.user_first_name == "there"
 
 
-def test_missing_env_reference_is_rejected():
+def test_missing_env_reference_outside_accounts_is_rejected():
+    # Inside an account it only makes that account unavailable (test_config_loading.py).
     with pytest.raises(ValueError, match="SMIO_TEST_UNSET"):
-        config.parse_config(BASE.replace("${IMAP_HOST}", "${SMIO_TEST_UNSET}"))
+        config.parse_config(BASE.replace("delivery: {", "delivery: {folder: '${SMIO_TEST_UNSET}', "))
 
 
 @pytest.mark.parametrize(

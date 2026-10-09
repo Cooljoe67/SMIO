@@ -132,14 +132,14 @@ def ensure_email_columns():
                     text(f"ALTER TABLE emails ADD COLUMN {column_name} {column_type}")
                 )
         # Mails from before multi-account support belong to the primary account;
-        # imported labelled data belongs to no mailbox.
-        connection.execute(
-            text(
-                "UPDATE emails SET account = :account "
-                "WHERE account IS NULL AND COALESCE(is_training_data, 0) = 0"
-            ),
-            {"account": primary_account().id},
-        )
+        # imported labelled data belongs to no mailbox. The config is read only
+        # when such mails exist, so migrating never depends on it.
+        unassigned = "account IS NULL AND COALESCE(is_training_data, 0) = 0"
+        if connection.execute(text(f"SELECT 1 FROM emails WHERE {unassigned} LIMIT 1")).first():
+            connection.execute(
+                text(f"UPDATE emails SET account = :account WHERE {unassigned}"),
+                {"account": primary_account().id},
+            )
         # Labels from before folder lists existed refer to the original list.
         connection.execute(text(
             "UPDATE emails SET folder_list = 'default' WHERE folder_list IS NULL "

@@ -81,6 +81,8 @@ class Account(_Strict):
     imap: Optional[ImapConnection] = None
     gmail: Optional[GmailConnection] = None
     exchange: Optional[ExchangeConnection] = None
+    # Set by parse_config, not in the YAML: why the account cannot be used.
+    unavailable: Optional[str] = None
 
     @model_validator(mode="after")
     def _connection_matches_provider(self):
@@ -128,11 +130,12 @@ class SmioConfig(_Strict):
         raise ValueError(f"Unknown account: {account_id!r}")
 
 
-def _expand_env(value):
+def _expand_env(value, missing=None):
+    """Replace ${VAR} references; unset ones raise, or go to `missing` as ""."""
     if isinstance(value, dict):
-        return {key: _expand_env(item) for key, item in value.items()}
+        return {key: _expand_env(item, missing) for key, item in value.items()}
     if isinstance(value, list):
-        return [_expand_env(item) for item in value]
+        return [_expand_env(item, missing) for item in value]
     if not isinstance(value, str):
         return value
 
@@ -140,16 +143,38 @@ def _expand_env(value):
         name, default = match.groups()
         resolved = os.getenv(name)
         if resolved is None or resolved == "":
-            if default is None:
+            if default is not None:
+                return default
+            if missing is None:
                 raise ValueError(f"Environment variable {name} is not set")
-            return default
+            missing.append(name)
+            return ""
         return resolved
 
     return _ENV_REFERENCE.sub(replace, value)
 
 
+def _expand_account(account):
+    """Expand one account; an unset variable makes only this account unavailable."""
+    missing = []
+    expanded = _expand_env(account, missing)
+    if missing and isinstance(expanded, dict):
+        expanded["unavailable"] = (
+            f"environment variable(s) not set: {', '.join(dict.fromkeys(missing))}"
+        )
+        logger.error("Account %r is unavailable: %s", expanded.get("id"), expanded["unavailable"])
+    return expanded
+
+
 def parse_config(text):
-    return SmioConfig.model_validate(_expand_env(yaml.safe_load(text) or {}))
+    data = yaml.safe_load(text) or {}
+    if isinstance(data, dict) and isinstance(data.get("accounts"), list):
+        # Per account, so one unset variable leaves the others usable. An
+        # unavailable account keeps its place: the primary stays the first one.
+        accounts = [_expand_account(account) for account in data["accounts"]]
+        data = {key: value for key, value in data.items() if key != "accounts"}
+        return SmioConfig.model_validate({**_expand_env(data), "accounts": accounts})
+    return SmioConfig.model_validate(_expand_env(data))
 
 
 def _reads_from_gcs():

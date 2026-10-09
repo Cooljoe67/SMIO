@@ -25,6 +25,8 @@ SENT_SYNC_DAYS = int(os.getenv("SMIO_SENT_SYNC_DAYS", "30"))
 
 def open_mailbox(account):
     """Log in to an account's mailbox; use as a context manager."""
+    if account.unavailable:
+        raise RuntimeError(f"Account {account.id!r} is unavailable: {account.unavailable}")
     if account.provider != "imap":
         raise NotImplementedError(
             f"Account {account.id!r}: provider {account.provider!r} is not supported yet"

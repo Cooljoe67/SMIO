@@ -3,10 +3,15 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import create_engine, text
 
 from src import config
+from src.api.utils import imap_client
+from src.db import database
+from src.scheduler import workflows
 from src.storage import gcs
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +33,14 @@ accounts:
 
 
 BUNDLED = _config_text("Bundled")
+
+TWO_ACCOUNTS = BUNDLED + """
+  - id: second
+    provider: imap
+    email: second@test
+    folder_list: default
+    imap: {host: imap.second, username: "${SMIO_TEST_UNSET}", password: "${SMIO_TEST_UNSET_TOO}"}
+"""
 
 
 class FakeBlob:
@@ -128,6 +141,89 @@ def test_broken_gcs_config_later_keeps_the_previous_one(bucket, monkeypatch):
     bucket[config.CONFIG_GCS_OBJECT] = "folder_lists: ["
 
     assert config.reload_config() is previous
+
+
+def test_account_with_an_unset_variable_is_kept_but_unavailable(caplog):
+    with caplog.at_level(logging.ERROR, logger="src.config"):
+        parsed = config.parse_config(TWO_ACCOUNTS)
+
+    assert [account.id for account in parsed.accounts] == ["primary", "second"]
+    assert parsed.account("primary").unavailable is None
+    assert parsed.account("second").unavailable == (
+        "environment variable(s) not set: SMIO_TEST_UNSET, SMIO_TEST_UNSET_TOO"
+    )
+    assert "'second' is unavailable" in caplog.text
+
+
+def test_unavailable_primary_account_stays_the_primary_one():
+    parsed = config.parse_config(
+        TWO_ACCOUNTS.replace("host: imap.test", 'host: "${SMIO_TEST_UNSET}"')
+    )
+
+    assert parsed.accounts[0].id == "primary"
+    assert "SMIO_TEST_UNSET" in parsed.accounts[0].unavailable
+
+
+def test_unavailable_account_is_refused_before_connecting(monkeypatch):
+    account = config.parse_config(TWO_ACCOUNTS).account("second")
+    monkeypatch.setattr(imap_client, "MailBox", lambda host: pytest.fail("connected"))
+
+    with pytest.raises(RuntimeError, match="'second' is unavailable: environment variable"):
+        imap_client.open_mailbox(account)
+
+
+def test_five_minute_workflow_reports_the_unavailable_account(monkeypatch):
+    monkeypatch.setattr(config, "_config", config.parse_config(TWO_ACCOUNTS))
+    monkeypatch.setattr(workflows, "reload_config", lambda **kwargs: None)
+    monkeypatch.setattr(workflows, "persist_database", lambda: False)
+    monkeypatch.setattr(
+        imap_client, "MailBox", lambda host: SimpleNamespace(login=lambda user, password: host)
+    )
+
+    def fetch_inbox(account):
+        imap_client.open_mailbox(account)
+        return []
+
+    monkeypatch.setattr(workflows, "fetch_inbox", fetch_inbox)
+    monkeypatch.setattr(workflows, "process_instruction_mails", lambda account, is_primary: {})
+    monkeypatch.setattr(workflows, "SessionLocal", lambda: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(workflows, "process_unprocessed_emails", lambda db, account: (None, [], []))
+    monkeypatch.setattr(workflows, "update_statuses_from_replies", lambda db, account: {})
+
+    results = workflows.run_five_minute_workflow()["accounts"]
+
+    assert results["primary"]["processed"] == 0
+    assert results["second"] == {"error": (
+        "Account 'second' is unavailable: "
+        "environment variable(s) not set: SMIO_TEST_UNSET, SMIO_TEST_UNSET_TOO"
+    )}
+
+
+def test_schema_migration_reads_the_config_only_for_unassigned_mails(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{(tmp_path / 'smio.db').as_posix()}")
+    with engine.begin() as connection:
+        connection.execute(text(
+            "CREATE TABLE emails (id INTEGER PRIMARY KEY, processed INTEGER, classification TEXT, "
+            "true_label TEXT, uid TEXT, account TEXT, is_training_data BOOLEAN)"
+        ))
+        connection.execute(text(
+            "INSERT INTO emails (id, processed, uid, account, is_training_data) "
+            "VALUES (1, 1, '5', 'primary', 0), (2, 0, NULL, NULL, 1)"
+        ))
+    monkeypatch.setattr(database, "engine", engine)
+    monkeypatch.setattr(database, "persist_database", lambda: False)
+
+    def unreadable_config():
+        raise ValueError("the config must not be needed")
+
+    monkeypatch.setattr(database, "primary_account", unreadable_config)
+
+    database.ensure_email_columns()
+
+    with engine.connect() as connection:
+        accounts = connection.execute(text("SELECT account FROM emails ORDER BY id")).scalars().all()
+    assert accounts == ["primary", None]
+    engine.dispose()
 
 
 def test_gcs_bucket_is_read_when_used(monkeypatch):
