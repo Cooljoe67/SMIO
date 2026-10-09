@@ -182,6 +182,10 @@ def ensure_email_columns():
                 "AND classification_source IS NULL"
             )
         )
+        # Imported labelled data is for training; the holdout measures real corrections.
+        connection.execute(
+            text("UPDATE emails SET is_eval_holdout = 0 WHERE is_training_data = 1")
+        )
         connection.execute(
             text(
                 "UPDATE emails SET processing_batch = 0 "

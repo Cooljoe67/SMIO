@@ -3,11 +3,12 @@ from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.orm import sessionmaker
 
 from src import config
 from src.api.utils import command_processor, imap_client, inbox_processor
 from src.db import database
-from src.db.models import Email
+from src.db.models import Base, Email
 from src.scheduler import workflows
 
 TWO_ACCOUNTS = """
@@ -266,4 +267,26 @@ def test_existing_mails_get_the_primary_account_and_original_folder_list(tmp_pat
     # Only labelled mails get the original folder list; unclassified ones get theirs later.
     assert rows == [("first", "default"), ("first", None)]
     assert "ix_emails_account" in {index["name"] for index in inspect(engine).get_indexes("emails")}
+    engine.dispose()
+
+
+def test_imported_training_data_leaves_the_eval_holdout(tmp_path, monkeypatch, accounts):
+    engine = create_engine(f"sqlite:///{(tmp_path / 'old.db').as_posix()}")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    session.add_all([
+        Email(id=1, true_label="tech", is_training_data=True, is_eval_holdout=True),
+        Email(id=2, true_label="tech", classification_source="imap_folder", is_eval_holdout=True),
+    ])
+    session.commit()
+    session.close()
+    monkeypatch.setattr(database, "engine", engine)
+    monkeypatch.setattr(database, "persist_database", lambda: False)
+
+    database.ensure_email_columns()
+
+    with engine.connect() as connection:
+        rows = connection.execute(text("SELECT id, is_eval_holdout FROM emails ORDER BY id")).all()
+    # Only the real correction stays in the holdout.
+    assert rows == [(1, 0), (2, 1)]
     engine.dispose()

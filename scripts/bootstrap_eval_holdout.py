@@ -23,7 +23,11 @@ def bootstrap_eval_holdout(ratio=HOLDOUT_RATIO):
         for label in LABEL2ID:
             candidates = (
                 db.query(Email)
-                .filter(Email.true_label == label, Email.is_eval_holdout.is_(False))
+                .filter(
+                    Email.true_label == label,
+                    Email.is_eval_holdout.is_(False),
+                    Email.is_training_data.is_(False),
+                )
                 .all()
             )
             n_holdout = round(len(candidates) * ratio)
