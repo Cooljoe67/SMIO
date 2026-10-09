@@ -99,9 +99,13 @@ def update_statuses_from_replies(db, account):
         try:
             decision = reply_status.assess_reply(target, reply, reply_is_ours=_is_own(reply, account))
         except reply_status.StatusCheckError as error:
-            logger.warning("Status check for reply %s failed: %s", reply.id, error)
             result["failed"] += 1
-            if error.retryable:
+            if error.kind == "fatal":
+                # Key, credit or model problem: every reply waits until it is fixed.
+                logger.error("Status checks for account %s stopped: %s", account.id, error)
+                break
+            logger.warning("Status check for reply %s failed: %s", reply.id, error)
+            if error.kind == "retryable":
                 # Rate limit or outage: stop and try again next run.
                 break
             reply.reply_checked_at = _now()
