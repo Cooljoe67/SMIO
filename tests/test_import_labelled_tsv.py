@@ -84,3 +84,37 @@ def test_real_dataset_folders_all_map_to_the_folder_list():
         names = {row["FOLDER"] for row in csv.DictReader(file, delimiter="\t") if row["FOLDER"]}
 
     assert names <= set(labels)
+
+
+def test_own_company_is_replaced_with_a_neutral_one(db, tmp_path):
+    own = (
+        "Z-4\tTRAIN\t\tINTERNAL\tNord Spedition\tk.meier@nord-spedition.de\talle@nord-spedition.de\t"
+        "Info von nord-spedition.de\tGrüße, Ihr Nord-Spedition Team aus Nord\\nNord Spedition GmbH\tNORD_SPEDITION.pdf\tja\tnein\tnein"
+        "\t\tEASY" + "\t" * 15
+    )
+    inbound = LABELLED.replace("info@rc.de", "dispo@nord-spedition.de")
+
+    import_labelled_tsv.import_tsv(db, _write(tmp_path, own, inbound), "logistics")
+
+    internal, received = db.query(Email).order_by(Email.dataset_key.desc()).all()
+    assert (internal.sender_name, internal.sender) == ("Firma", "k.meier@firma.example")
+    assert internal.recipients == "alle@firma.example"
+    assert internal.subject == "Info von firma.example"
+    # The full name is replaced; a single word of it (often a place) is kept.
+    assert internal.text == "Grüße, Ihr Firma Team aus Nord\nFirma GmbH"
+    assert internal.attachment_names == "Firma.pdf"
+    assert received.recipients == "dispo@firma.example"
+
+
+def test_keep_company_leaves_the_data_unchanged(db, tmp_path):
+    own = UNLABELLED.replace("k.meier@rc.de", "k.meier@nord-spedition.de")
+
+    import_labelled_tsv.import_tsv(db, _write(tmp_path, own), "logistics", keep_company=True)
+
+    assert db.query(Email).one().sender == "k.meier@nord-spedition.de"
+
+
+def test_a_one_word_company_name_is_not_replaced_in_the_text():
+    neutralize = import_labelled_tsv.neutralizer("rc.de")
+
+    assert neutralize("Sendung RC-2026-0902 an info@rc.de") == "Sendung RC-2026-0902 an info@firma.example"

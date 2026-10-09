@@ -5,11 +5,17 @@ the file changes. Rows without a FOLDER label (the TEST split) are imported
 without labels. Folder labels are mapped from the dataset's folder names to the
 keys of a folder list in config/smio.yaml; "Sonstiges" is the implicit "other".
 
-Usage: python -m scripts.import_labelled_tsv [path] [--folder-list logistics]
+The dataset company's own domain and name are replaced with neutral ones, so a
+model trained on it does not learn one company's addresses. The company is
+recognised from the rows whose sender is in the own domain.
+
+Usage: python -m scripts.import_labelled_tsv [path] [--folder-list logistics] [--keep-company]
 """
 
 import argparse
 import csv
+import re
+from collections import Counter
 
 from src.config import get_config
 from src.db.database import SessionLocal, ensure_email_columns
@@ -17,6 +23,12 @@ from src.db.models import Email
 
 OTHER_FOLDER_NAME = "Sonstiges"
 BOOLEANS = {"ja": True, "nein": False}
+NEUTRAL_DOMAIN = "firma.example"
+NEUTRAL_NAME = "Firma"
+NEUTRALIZED_COLUMNS = (
+    "senderName", "senderAddress", "recipientAddress", "subject", "body",
+    "attachmentNames", "NOTE", "VORSCHLAG_BEGRUENDUNG",
+)
 
 
 def _value(row, column):
@@ -41,6 +53,33 @@ def folder_labels(folder_list):
     return labels
 
 
+def own_domain(rows):
+    """Most common sender domain of the rows marked as sent from the own domain."""
+    domains = Counter(
+        row["senderAddress"].rpartition("@")[2].lower()
+        for row in rows
+        if (row.get("isOwnDomainSender") or "").strip().lower() == "ja" and "@" in row["senderAddress"]
+    )
+    return domains.most_common(1)[0][0] if domains else None
+
+
+def neutralizer(domain):
+    """Replace the domain and the company name derived from it (nord-spedition.de ->
+    "Nord Spedition", "Nord-Spedition", ...). Single words of the name are left
+    alone, since they are often places."""
+    name_parts = re.split(r"[-_.]+", domain.rsplit(".", 1)[0])
+    domain_pattern = re.compile(re.escape(domain), re.IGNORECASE)
+    name_pattern = re.compile(
+        r"\b" + r"[\s\-_]*".join(map(re.escape, name_parts)) + r"\b", re.IGNORECASE
+    )
+
+    def neutralize(value):
+        value = domain_pattern.sub(NEUTRAL_DOMAIN, value or "")
+        # A one-word name would also hit reference numbers and ordinary words.
+        return name_pattern.sub(NEUTRAL_NAME, value) if len(name_parts) > 1 else value
+    return neutralize
+
+
 def _label(row, column, labels):
     name = _value(row, column)
     if name is None:
@@ -60,8 +99,7 @@ def apply_row(email, row, folder_list, labels):
     email.sender = _value(row, "senderAddress")
     email.recipients = _value(row, "recipientAddress")
     email.subject = _value(row, "subject")
-    # The file stores line breaks as a literal backslash-n.
-    email.text = (_value(row, "body") or "").replace("\\n", "\n")
+    email.text = _value(row, "body") or ""
     email.attachment_names = _value(row, "attachmentNames")
     email.is_own_domain_sender = _boolean(row, "isOwnDomainSender")
     email.is_reply = _boolean(row, "isReply")
@@ -93,10 +131,20 @@ def apply_row(email, row, folder_list, labels):
     email.processing_batch = email.processing_batch or 0
 
 
-def import_tsv(db, path, folder_list):
+def import_tsv(db, path, folder_list, keep_company=False):
     labels = folder_labels(folder_list)
     with open(path, encoding="utf-8-sig", newline="") as file:
         rows = list(csv.DictReader(file, delimiter="\t"))
+    # The file stores line breaks as a literal backslash-n; convert them first so
+    # a name at the start of a line is still a separate word.
+    rows = [{**row, "body": (row.get("body") or "").replace("\\n", "\n")} for row in rows]
+    domain = None if keep_company else own_domain(rows)
+    if domain:
+        neutralize = neutralizer(domain)
+        rows = [
+            {**row, **{column: neutralize(row.get(column)) for column in NEUTRALIZED_COLUMNS}}
+            for row in rows
+        ]
 
     existing = {
         email.dataset_key: email
@@ -121,12 +169,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("path", nargs="?", default="t1a-arbeitsblatt.tsv")
     parser.add_argument("--folder-list", default="logistics")
+    parser.add_argument(
+        "--keep-company",
+        action="store_true",
+        help="keep the dataset company's own domain and name instead of neutral ones",
+    )
     args = parser.parse_args()
 
     ensure_email_columns()
     db = SessionLocal()
     try:
-        print(import_tsv(db, args.path, args.folder_list))
+        print(import_tsv(db, args.path, args.folder_list, keep_company=args.keep_company))
     finally:
         db.close()
 
