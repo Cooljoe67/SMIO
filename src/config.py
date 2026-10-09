@@ -16,15 +16,17 @@ import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from src.storage import gcs
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# Before anything reads the environment, including the modules imported below.
+load_dotenv(REPO_ROOT / ".env")
+
+from src.storage import gcs  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = Path(os.getenv("SMIO_CONFIG_PATH", REPO_ROOT / "config" / "smio.yaml"))
 CONFIG_GCS_OBJECT = os.getenv("GCS_CONFIG_OBJECT", "config/smio.yaml")
-
-load_dotenv(REPO_ROOT / ".env")
 
 _ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 

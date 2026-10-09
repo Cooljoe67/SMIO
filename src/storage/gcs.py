@@ -5,15 +5,18 @@ import shutil
 from pathlib import Path, PurePosixPath
 
 
-BUCKET_NAME = os.getenv("GCS_BUCKET")
+def _bucket_name():
+    # Read on every call: .env may be loaded after this module is imported.
+    return os.getenv("GCS_BUCKET")
 
 
 def enabled():
-    return bool(BUCKET_NAME)
+    return bool(_bucket_name())
 
 
 def _bucket():
-    if not BUCKET_NAME:
+    bucket_name = _bucket_name()
+    if not bucket_name:
         raise RuntimeError("GCS_BUCKET must be set to use GCS storage")
 
     try:
@@ -23,7 +26,7 @@ def _bucket():
             "google-cloud-storage is required when GCS_BUCKET is configured"
         ) from error
 
-    return storage.Client().bucket(BUCKET_NAME)
+    return storage.Client().bucket(bucket_name)
 
 
 def download_file(object_name, destination):
