@@ -288,6 +288,17 @@ def test_reused_message_id_with_other_content_is_a_separate_mail(db, server):
     assert db.query(Email).count() == 2
 
 
+def test_reused_message_id_and_subject_with_another_date_is_a_separate_mail(db, server):
+    mailbox = server(**{"INBOX": [_message("1", message_id="<news@test>")], "INBOX/commercial": []})
+    _sync()
+    mailbox.move(["1"], "INBOX/commercial")
+    mailbox.folders["INBOX"].append(_message("2", message_id="<news@test>", date=SENT + timedelta(days=7)))
+
+    assert len(_sync()) == 1
+    first, second = db.query(Email).order_by(Email.id).all()
+    assert (first.folder, second.folder) == ("INBOX/commercial", "INBOX")
+
+
 def test_the_same_message_twice_in_the_inbox_is_stored_once(db, server):
     server(INBOX=[_message("1"), _message("2")])
 

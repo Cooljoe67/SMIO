@@ -166,11 +166,15 @@ def _find_email(db, account, message_id, mail_fingerprint, subject, date):
     emails = db.query(Email).filter(Email.account == account.id)
     if message_id:
         for email_obj in emails.filter(Email.message_id == message_id).order_by(Email.id):
-            # Some senders reuse Message-IDs; a different subject *and* date is another mail.
-            if (
-                email_obj.fingerprint in (None, mail_fingerprint)
-                or email_obj.subject == subject
-                or normalized_date(email_obj.date) == normalized_date(date)
+            # Some senders reuse Message-IDs; a different subject or a different
+            # Date (which a move never changes) is another mail.
+            if email_obj.fingerprint in (None, mail_fingerprint) or (
+                email_obj.subject == subject
+                and (
+                    email_obj.date is None
+                    or date is None
+                    or normalized_date(email_obj.date) == normalized_date(date)
+                )
             ):
                 return email_obj
     return emails.filter(Email.fingerprint == mail_fingerprint).first()
