@@ -79,6 +79,19 @@ def test_mail_sent_to_oneself_keeps_its_inbox_copy(db, server):
     assert email.folder == "INBOX" and email.direction is None
 
 
+def test_inbox_copy_arriving_after_the_sent_copy_is_processed(db, server, monkeypatch):
+    mailbox = server(flags={"Sent": ("\\Sent",)}, INBOX=[], Sent=[_message("7")])
+    _sync()
+    mailbox.folders["INBOX"].append(_message("1"))
+    _sync()
+
+    email = db.query(Email).one()
+    assert (email.folder, email.direction, email.processed, email.processing_batch) == ("INBOX", None, 0, None)
+    monkeypatch.setattr(inbox_processor, "open_mailbox", lambda account: mailbox)
+    _, results, _ = inbox_processor.process_unprocessed_emails(db, primary_account())
+    assert [r["email_id"] for r in results] == [email.id]
+
+
 def test_references_are_stored_in_order(db, server):
     server(INBOX=[_message("1", References="<r1@test>\r\n <r2@test>", **{"In-Reply-To": "<r2@test>"})])
 

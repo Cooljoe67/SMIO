@@ -284,6 +284,16 @@ def _sync_message(
             email_obj.direction = "OUTBOUND"
             email_obj.processed = 1
             email_obj.processing_batch = 0
+    elif (
+        email_obj.direction == "OUTBOUND"
+        and folder_name == inbox_folder(account)
+        and email_obj.classification is None
+    ):
+        # Sent to oneself, and the Sent copy was synced in an earlier run: the
+        # inbox copy is received mail and is processed like any other.
+        email_obj.direction = None
+        email_obj.processed = 0
+        email_obj.processing_batch = None
     email_obj.message_id = message_id
     email_obj.fingerprint = mail_fingerprint
     in_reply_to = _message_ids(_header(msg, "In-Reply-To"))
