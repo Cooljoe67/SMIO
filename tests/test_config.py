@@ -96,14 +96,16 @@ def test_scripts_can_load_the_config_without_the_imap_password(monkeypatch):
     from src.api.utils import imap_client
 
     monkeypatch.delenv("IMAP_PASSWORD")
-    parsed = config.parse_config(
-        config.CONFIG_PATH.read_text(encoding="utf-8").replace(
-            "password_secret: imap-password", "password: ${IMAP_PASSWORD:-}"
-        )
-    )
+    text = config.CONFIG_PATH.read_text(encoding="utf-8")
+    # The secret is read only at login.
+    assert config.parse_config(text).accounts[0].imap.password_secret == "imap-password"
 
-    with pytest.raises(RuntimeError, match="no IMAP password"):
-        imap_client.open_mailbox(parsed.accounts[0])
+    # The documented alternative for local runs without Google Cloud.
+    local = config.parse_config(
+        text.replace("password_secret: imap-password", "password: ${IMAP_PASSWORD}")
+    )
+    with pytest.raises(RuntimeError, match="unavailable: environment variable.*IMAP_PASSWORD"):
+        imap_client.open_mailbox(local.accounts[0])
 
 
 def test_repository_config_is_valid():

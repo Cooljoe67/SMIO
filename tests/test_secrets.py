@@ -131,6 +131,16 @@ def test_mailbox_logs_in_with_the_secret(monkeypatch):
     assert server.logins == ["secret"]
 
 
+def test_empty_plain_password_is_refused(monkeypatch):
+    monkeypatch.setattr(imap_client, "MailBox", lambda host: pytest.fail("connected"))
+    account = config.parse_config(
+        _account("imap", "host: imap.test, username: owner@test, password: ''")
+    ).accounts[0]
+
+    with pytest.raises(RuntimeError, match="no IMAP password"):
+        imap_client.open_mailbox(account)
+
+
 def test_rotated_password_is_read_again_after_a_failed_login(secret_manager, monkeypatch):
     values, accessed = secret_manager
     secret_store._cache["imap-password"] = "old"
