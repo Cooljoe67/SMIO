@@ -72,22 +72,22 @@ def test_label_ids(script):
     assert script.label_ids("default") == {
         "delivery": 0, "commercial": 1, "social": 2, "other": 3, "tech": 4,
     }
-    ids = script.label_ids("rhein-cargo")
+    ids = script.label_ids("logistics")
     assert ids["other"] == len(ids) - 1
     assert sorted(ids.values()) == list(range(11))
 
 
 def test_load_data_only_uses_the_folder_lists_labels(db, script):
     db.add_all([
-        Email(folder_list="rhein-cargo", true_label="dokumente", text="a", case_ref="VG:1"),
-        Email(folder_list="rhein-cargo", true_label="other", text="b"),
-        Email(folder_list="rhein-cargo", true_label=None, text="unlabelled"),
+        Email(folder_list="logistics", true_label="dokumente", text="a", case_ref="VG:1"),
+        Email(folder_list="logistics", true_label="other", text="b"),
+        Email(folder_list="logistics", true_label=None, text="unlabelled"),
         Email(folder_list="default", true_label="other", text="other list"),
     ])
     db.commit()
-    ids = script.label_ids("rhein-cargo")
+    ids = script.label_ids("logistics")
 
-    texts, labels, groups, _ = script.load_data(db, "rhein-cargo", ids)
+    texts, labels, groups, _ = script.load_data(db, "logistics", ids)
 
     assert texts == ["a", "b"]
     assert labels == [ids["dokumente"], ids["other"]]
@@ -95,11 +95,11 @@ def test_load_data_only_uses_the_folder_lists_labels(db, script):
 
 
 def test_load_data_rejects_labels_outside_the_list(db, script):
-    db.add(Email(folder_list="rhein-cargo", true_label="delivery", text="a"))
+    db.add(Email(folder_list="logistics", true_label="delivery", text="a"))
     db.commit()
 
     with pytest.raises(ValueError, match="delivery"):
-        script.load_data(db, "rhein-cargo", script.label_ids("rhein-cargo"))
+        script.load_data(db, "logistics", script.label_ids("logistics"))
 
 
 def test_folds_keep_each_case_in_one_fold_and_cover_every_mail(script):

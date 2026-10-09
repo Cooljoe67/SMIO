@@ -5,7 +5,7 @@ the file changes. Rows without a FOLDER label (the TEST split) are imported
 without labels. Folder labels are mapped from the dataset's folder names to the
 keys of a folder list in config/smio.yaml; "Sonstiges" is the implicit "other".
 
-Usage: python -m scripts.import_labelled_tsv [path] [--folder-list rhein-cargo]
+Usage: python -m scripts.import_labelled_tsv [path] [--folder-list logistics]
 """
 
 import argparse
@@ -120,7 +120,7 @@ def import_tsv(db, path, folder_list):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("path", nargs="?", default="t1a-arbeitsblatt.tsv")
-    parser.add_argument("--folder-list", default="rhein-cargo")
+    parser.add_argument("--folder-list", default="logistics")
     args = parser.parse_args()
 
     ensure_email_columns()

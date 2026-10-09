@@ -15,7 +15,7 @@ to choose the learning rate.
 the new one; for the default list, RESTORE MODEL can bring it back.
 
 Usage:
-    python -m scripts.train_distilbert_optuna --folder-list rhein-cargo [--publish]
+    python -m scripts.train_distilbert_optuna --folder-list logistics [--publish]
 """
 
 import argparse

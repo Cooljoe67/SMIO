@@ -38,7 +38,7 @@ folder_lists:
   # Logistics folders of the labelled dataset (t1a-arbeitsblatt.tsv); its
   # "Sonstiges" is the implicit "other". Business mail is kept; only read
   # newsletters are deleted after 10 days.
-  rhein-cargo:
+  logistics:
     transportanfragen: {folder: "Transportanfragen"}
     transportauftraege: {folder: "Transportaufträge"}
     transportabwicklung: {folder: "Transportabwicklung"}

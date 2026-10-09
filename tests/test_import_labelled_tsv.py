@@ -33,12 +33,12 @@ def _write(tmp_path, *rows):
 def test_rows_are_imported_as_labelled_training_data(db, tmp_path):
     path = _write(tmp_path, LABELLED, UNLABELLED, OTHER)
 
-    assert import_labelled_tsv.import_tsv(db, path, "rhein-cargo") == {
+    assert import_labelled_tsv.import_tsv(db, path, "logistics") == {
         "created": 3, "updated": 0, "labelled": 2,
     }
 
     labelled, unlabelled, other = db.query(Email).order_by(Email.dataset_key).all()
-    assert labelled.folder_list == "rhein-cargo"
+    assert labelled.folder_list == "logistics"
     assert labelled.true_label == labelled.classification == "dokumente"
     assert labelled.classification_source == "dataset"
     assert (labelled.true_status, labelled.true_mail_type_2) == ("Zu erledigen", "Rückfrage")
@@ -56,10 +56,10 @@ def test_rows_are_imported_as_labelled_training_data(db, tmp_path):
 
 
 def test_reimport_updates_rows_instead_of_duplicating(db, tmp_path):
-    import_labelled_tsv.import_tsv(db, _write(tmp_path, LABELLED), "rhein-cargo")
+    import_labelled_tsv.import_tsv(db, _write(tmp_path, LABELLED), "logistics")
     changed = LABELLED.replace("Zu erledigen\tNormal\tBestätigung", "Abgeschlossen\tNormal\tBestätigung", 1)
 
-    result = import_labelled_tsv.import_tsv(db, _write(tmp_path, changed), "rhein-cargo")
+    result = import_labelled_tsv.import_tsv(db, _write(tmp_path, changed), "logistics")
 
     assert result == {"created": 0, "updated": 1, "labelled": 1}
     assert db.query(Email).one().true_status == "Abgeschlossen"
@@ -69,7 +69,7 @@ def test_unknown_folder_is_rejected(db, tmp_path):
     path = _write(tmp_path, LABELLED.replace("Dokumente & Frachtpapiere", "Unbekannt", 1))
 
     with pytest.raises(ValueError, match="Unbekannt"):
-        import_labelled_tsv.import_tsv(db, path, "rhein-cargo")
+        import_labelled_tsv.import_tsv(db, path, "logistics")
 
 
 def test_real_dataset_folders_all_map_to_the_folder_list():
@@ -79,7 +79,7 @@ def test_real_dataset_folders_all_map_to_the_folder_list():
     path = Path(__file__).resolve().parents[1] / "t1a-arbeitsblatt.tsv"
     if not path.exists():
         pytest.skip("dataset not present")
-    labels = import_labelled_tsv.folder_labels("rhein-cargo")
+    labels = import_labelled_tsv.folder_labels("logistics")
     with open(path, encoding="utf-8-sig", newline="") as file:
         names = {row["FOLDER"] for row in csv.DictReader(file, delimiter="\t") if row["FOLDER"]}
 
