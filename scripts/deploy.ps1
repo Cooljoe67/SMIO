@@ -356,6 +356,7 @@ Invoke-Gcloud @("services", "enable", "artifactregistry.googleapis.com", "run.go
 # Credentials are kept only in Secret Manager; ask once for any that are missing.
 Confirm-Secret $ImapHostSecret "IMAP host" -Default (Resolve-ConfigValue "" "IMAP_HOST" $DotEnvValues) | Out-Null
 Confirm-Secret $ImapUserSecret "IMAP user" -Default (Resolve-ConfigValue "" "IMAP_USER" $DotEnvValues) | Out-Null
+# Not bound to the service: the app reads it at login (password_secret in config/smio.yaml).
 Confirm-Secret $ImapPasswordSecret "IMAP password" -Hidden | Out-Null
 $anthropicSecretExists = Confirm-Secret $AnthropicApiKeySecret "Anthropic API key (Enter to skip)" -Hidden -Optional
 
@@ -422,10 +423,11 @@ Invoke-Gcloud @(
     "--role=roles/storage.objectAdmin"
 )
 
+# Account passwords are not bound here: the app reads them from Secret Manager
+# (see scripts/add_account.ps1), so adding an account needs no redeploy.
 $secretBindings = @(
     "IMAP_HOST=$ImapHostSecret`:latest",
-    "IMAP_USER=$ImapUserSecret`:latest",
-    "IMAP_PASSWORD=$ImapPasswordSecret`:latest"
+    "IMAP_USER=$ImapUserSecret`:latest"
 )
 # Optional: without it, reply-based status updates wait for a key.
 if ($anthropicSecretExists) {
@@ -461,7 +463,7 @@ if ($UpdateNerModel) {
     }
 }
 
-$deployEnvVars = "GCS_BUCKET=$GcsBucket,GCS_CLASSIFIER_MODEL_PREFIX=$GcsModelPrefix,GCS_NER_MODEL_PREFIX=$GcsNerModelPrefix,GCS_DATABASE_OBJECT=$GcsDatabaseObject,SMIO_SUMMARY_START_HOUR=$SummaryStartHour,SMIO_SUMMARY_TIMEZONE=$SummaryTimezone,SMIO_COMMAND_TIMEOUT_MINUTES=$CommandTimeoutMinutes"
+$deployEnvVars = "GOOGLE_CLOUD_PROJECT=$ProjectId,GCS_BUCKET=$GcsBucket,GCS_CLASSIFIER_MODEL_PREFIX=$GcsModelPrefix,GCS_NER_MODEL_PREFIX=$GcsNerModelPrefix,GCS_DATABASE_OBJECT=$GcsDatabaseObject,SMIO_SUMMARY_START_HOUR=$SummaryStartHour,SMIO_SUMMARY_TIMEZONE=$SummaryTimezone,SMIO_COMMAND_TIMEOUT_MINUTES=$CommandTimeoutMinutes"
 if ($NerModelRevision) {
     $deployEnvVars += ",SMIO_NER_MODEL_REVISION=$NerModelRevision"
 }

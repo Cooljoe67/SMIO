@@ -132,14 +132,14 @@ def ensure_email_columns():
                     text(f"ALTER TABLE emails ADD COLUMN {column_name} {column_type}")
                 )
         # Mails from before multi-account support belong to the primary account;
-        # imported labelled data belongs to no mailbox.
-        connection.execute(
-            text(
-                "UPDATE emails SET account = :account "
-                "WHERE account IS NULL AND COALESCE(is_training_data, 0) = 0"
-            ),
-            {"account": primary_account().id},
-        )
+        # imported labelled data belongs to no mailbox. The config is read only
+        # when such mails exist, so migrating never depends on it.
+        unassigned = "account IS NULL AND COALESCE(is_training_data, 0) = 0"
+        if connection.execute(text(f"SELECT 1 FROM emails WHERE {unassigned} LIMIT 1")).first():
+            connection.execute(
+                text(f"UPDATE emails SET account = :account WHERE {unassigned}"),
+                {"account": primary_account().id},
+            )
         # Labels from before folder lists existed refer to the original list.
         connection.execute(text(
             "UPDATE emails SET folder_list = 'default' WHERE folder_list IS NULL "
@@ -186,6 +186,21 @@ def ensure_email_columns():
         for column_name in obsolete_columns & existing_columns:
             connection.execute(text(f"ALTER TABLE emails DROP COLUMN {column_name}"))
     persist_database()
+
+
+def stored_account_ids():
+    """The accounts that stored mails belong to; none before the migration."""
+    # The first load of a GCS config asks, and it may come before the tables
+    # are created or from inside their migration.
+    inspector = inspect(engine)
+    if not inspector.has_table("emails") or "account" not in {
+        column["name"] for column in inspector.get_columns("emails")
+    }:
+        return set()
+    with engine.connect() as connection:
+        return set(connection.execute(
+            text("SELECT DISTINCT account FROM emails WHERE account IS NOT NULL")
+        ).scalars())
 
 
 def backfill_fingerprints():

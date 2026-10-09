@@ -16,7 +16,7 @@ from src.api.utils.imap_client import fetch_inbox
 from src.api.utils.inbox_processor import process_unprocessed_emails
 from src.api.utils.mailer import append_summary_to_inbox
 from src.api.utils.reply_tracking import update_statuses_from_replies
-from src.config import get_config, reload_config
+from src.config import get_config, reload_config, require_stored_account_ids
 from src.db.database import SessionLocal, persist_database
 from src.db.models import SummarySnapshot
 
@@ -31,8 +31,9 @@ def _run_exclusively(name, routine):
 
     try:
         try:
-            # Pick up folder/account changes made in GCS without a redeploy.
-            reload_config()
+            # Pick up folder/account changes made in GCS without a redeploy,
+            # but never one that drops the account id of stored mails.
+            reload_config(check=require_stored_account_ids)
             result = routine()
         except Exception:
             # Keep what was committed before the failure, but report the original error.

@@ -34,9 +34,10 @@ SMIO/
       utils/            # mailbox, commands, folder rules, email delivery
     db/                 # database engine, migrations, ORM models
     scheduler/          # scheduled workflow orchestration
-    storage/            # Google Cloud Storage integration
+    storage/            # Google Cloud Storage and Secret Manager integration
   scripts/              # deployment, data import/export, training, maintenance
     deploy.ps1
+    add_account.ps1
     update_ner_model.py
     sync_database_with_gcs.py
     run_workflow.py
@@ -129,8 +130,10 @@ git lfs install
 git lfs pull
 ```
 
-Then create a local `.env` containing the IMAP settings and start the API from
-the repository root:
+Then create a local `.env` containing the IMAP settings. The repository's
+[config/smio.yaml](config/smio.yaml) reads the IMAP password from Secret Manager;
+without Google Cloud, replace `password_secret: imap-password` there with
+`password: ${IMAP_PASSWORD}`. Start the API from the repository root:
 
 ```bash
 uvicorn src.api.main:app --host 0.0.0.0 --port 8080
@@ -182,7 +185,10 @@ gcloud run deploy smio \
 Set the IMAP values (and optionally `ANTHROPIC_API_KEY`) with Secret Manager rather
 than command-line environment variables or `.env`. `scripts/deploy.ps1` asks for any of
 the secrets `imap-host`, `imap-user`, `imap-password` and `claude-api-key` that do
-not exist yet (passwords and keys hidden) and creates them. Give the Cloud Run service account read/write access to the GCS bucket.
+not exist yet (passwords and keys hidden) and creates them. `imap-host`, `imap-user`
+and `claude-api-key` are bound to the service as environment variables; account
+passwords are read by SMIO itself at login (see
+[Mail accounts and credentials](#mail-accounts-and-credentials)). Give the Cloud Run service account read/write access to the GCS bucket.
 Create a dedicated scheduler service account, grant it `roles/run.invoker` on the
 `smio` service, then create the schedules with an OIDC token:
 
@@ -243,6 +249,26 @@ Daily summaries are appended directly to the configured IMAP inbox. The deploy
 script reads `GCP_PROJECT_ID`, `GCP_REGION`, and `GCS_BUCKET` from `.env`;
 `GCP_SCHEDULER_LOCATION` is optional and defaults to `GCP_REGION`. Explicit
 script parameters override `.env` values.
+
+The service gets no `IMAP_PASSWORD` variable. If the bucket holds a
+`config/smio.yaml` from an earlier version whose primary account uses
+`password: ${IMAP_PASSWORD...}`, change that line to `password_secret: imap-password`
+(or delete the object so the bundled config is uploaded) before deploying.
+
+### Add a mail account
+
+```powershell
+.\scripts\add_account.ps1
+```
+
+The script asks for the account id, IMAP host, username and password (hidden),
+stores the password as the secret `imap-<id>-password` (a new version if the secret
+exists), and prints the entry to add under `accounts:` together with the
+`gcloud storage cp` commands that download and upload the service's config. The
+next workflow run picks the account up; no redeploy is needed. `-Email` sets the
+account's address if it differs from the username, `-FolderList` its folder list,
+and `-GcsBucket` overrides `GCS_BUCKET` from `.env`. Run it again with the same id
+to change a password.
 
 ### Email commands
 
@@ -331,11 +357,13 @@ GCP_PROJECT_ID=your-google-cloud-project-id
 GCP_REGION=your-cloud-run-and-artifact-region
 # Optional; defaults to GCP_REGION.
 GCP_SCHEDULER_LOCATION=your-cloud-scheduler-region
+# Also points local SMIO processes at production data; see the note below.
 GCS_BUCKET=your-gcs-bucket
 
 # IMAP (required; referenced as ${IMAP_...} from config/smio.yaml)
 IMAP_HOST=imap.yourprovider.com
 IMAP_USER=your_email@example.com
+# Only with `password: ${IMAP_PASSWORD}` in config/smio.yaml (local runs).
 IMAP_PASSWORD=your_password
 # Daily summaries are appended directly to IMAP_USER's INBOX.
 
@@ -347,12 +375,65 @@ USER_FIRST_NAME=Example User
 GCS_CLASSIFIER_MODEL_PREFIX=models/distilbert_deployed
 GCS_NER_MODEL_PREFIX=models/ner-smio
 GCS_DATABASE_OBJECT=databases/smio.db
-# Folder lists and accounts; re-read from GCS on every workflow run.
+# Folder lists and accounts; the service re-reads it on every workflow run.
 GCS_CONFIG_OBJECT=config/smio.yaml
 SMIO_COMMAND_TIMEOUT_MINUTES=15
 ```
 
-Folder lists (one classifier model per list), per-folder on/off switches, retention and mail accounts are configured in [config/smio.yaml](config/smio.yaml). Secrets stay in the environment and are referenced as `${VAR}`.
+Folder lists (one classifier model per list), per-folder on/off switches, retention and mail accounts are configured in [config/smio.yaml](config/smio.yaml).
+The deployed service reads its copy from GCS (`GCS_CONFIG_OBJECT`) into memory at
+the start of every workflow run, so edits there apply without a redeploy; it uploads
+the bundled file only if the object does not exist. Scripts and local runs always
+use the checked-out file (set `SMIO_CONFIG_SOURCE=gcs` to make a local server read
+GCS like the service). An invalid GCS edit keeps the previous config; if the service
+starts with an invalid GCS copy it runs on the bundled file, so accounts listed only
+in the GCS copy wait until it is fixed. Errors are logged.
+
+`.env` is loaded by every SMIO process, so a `GCS_BUCKET` there also makes local
+scripts and a local server download and upload the production database and models:
+each start replaces the local `smio.db` with the production copy, so rows imported
+by one script are gone when the next one starts. Keep it out of `.env` on machines
+that run SMIO locally against their own `smio.db`, and pass `-GcsBucket` to
+`deploy.ps1` and `add_account.ps1` there instead.
+
+### Mail accounts and credentials
+
+Each account has an `id` that its stored mails are keyed by. Never change it: a
+renamed account would import its inbox again as new mail. A workflow run never
+switches to a config that drops the id of stored mails: it logs an error and keeps
+the previous config. A starting service rejects such a GCS copy the same way and
+runs on the bundled file instead, as it is: accounts added to the GCS copy only are
+not processed until the GCS copy is fixed, and the others keep running. Scripts use
+their checked-out file as it is.
+
+Credentials are never written into the config. Each one is either the name of a
+Google Secret Manager secret, read by SMIO when the account logs in, or a `${VAR}`
+reference to the environment:
+
+| Provider | Credential | Secret field | Secret per |
+|---|---|---|---|
+| IMAP | password | `password_secret` | account (`imap-<id>-password`) |
+| Gmail | OAuth client secret | `client_secret_secret` | Google Cloud OAuth client, shared by all Gmail accounts |
+| Gmail | refresh token | `refresh_token_secret` | account |
+| Exchange | client secret | `client_secret_secret` | Entra ID app registration, one per tenant |
+
+One secret per credential holder keeps each secret's scope as narrow as the
+credential itself, and adding an account means one new secret and a config edit
+instead of a new Cloud Run binding and a redeploy. Set exactly one of a field and
+its `*_secret` variant. Secrets are cached for the life of the instance; after a
+failed login SMIO reads the password secret again and retries once, so rotating a
+password only needs a new secret version. Gmail and Exchange are not supported yet;
+their secret fields only exist in the schema.
+
+The deploy script grants the runtime service account `Secret Manager Secret
+Accessor` on the project, which covers secrets added later. SMIO finds the project
+in `GOOGLE_CLOUD_PROJECT` (set by the deploy script) or `GCP_PROJECT_ID`, else from
+Application Default Credentials; local runs that use a secret need
+`gcloud auth application-default login`.
+
+An account whose `${VAR}` references are not set is not rejected with the rest of the
+config: it is marked unavailable, logged, and reported as an error by the
+five-minute job, while the other accounts keep running.
 
 When `GCS_BUCKET` is configured, SMIO downloads the deployed model and database at
 startup. The first GCS-enabled run uploads its existing local artifacts if the bucket

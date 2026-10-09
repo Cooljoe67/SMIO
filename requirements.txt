@@ -25,6 +25,7 @@ python-dotenv
 # Utilities
 beautifulsoup4
 google-cloud-storage
+google-cloud-secret-manager
 google-cloud-logging
 google-auth
 

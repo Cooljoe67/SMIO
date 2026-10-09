@@ -1,8 +1,10 @@
 """Folder lists and mail accounts, loaded from config/smio.yaml.
 
-When GCS is enabled the file is downloaded from GCS_CONFIG_OBJECT on every
-reload, so production changes (e.g. switching a folder off) apply on the next
-workflow run without a redeploy. Secrets are referenced as ${ENV_VAR}.
+The deployed service reads GCS_CONFIG_OBJECT from GCS on every reload, so
+production changes (e.g. switching a folder off) apply on the next workflow
+run without a redeploy; the file in the image is only the initial upload and
+the fallback. Scripts and local runs read the checked-out file. Secrets are
+referenced as ${ENV_VAR} or, read at login, by Secret Manager name (*_secret).
 """
 
 import logging
@@ -16,15 +18,17 @@ import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from src.storage import gcs
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# Before anything reads the environment, including the modules imported below.
+load_dotenv(REPO_ROOT / ".env")
+
+from src.storage import gcs  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = Path(os.getenv("SMIO_CONFIG_PATH", REPO_ROOT / "config" / "smio.yaml"))
 CONFIG_GCS_OBJECT = os.getenv("GCS_CONFIG_OBJECT", "config/smio.yaml")
-
-load_dotenv(REPO_ROOT / ".env")
 
 _ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
@@ -49,22 +53,49 @@ class MailboxLayout(_Strict):
     sent: Optional[str] = None
 
 
+def _one_source(connection, field):
+    """A credential is given either itself or as <field>_secret, the name of a
+    Secret Manager secret read at login."""
+    if (getattr(connection, field) is None) == (getattr(connection, f"{field}_secret") is None):
+        raise ValueError(f"set exactly one of '{field}' and '{field}_secret'")
+
+
 class ImapConnection(_Strict):
     host: str
     username: str
-    password: str
+    password: Optional[str] = None
+    password_secret: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _one_password(self):
+        _one_source(self, "password")
+        return self
 
 
 class GmailConnection(_Strict):
     client_id: str
-    client_secret: str
-    refresh_token: str
+    client_secret: Optional[str] = None
+    client_secret_secret: Optional[str] = None
+    refresh_token: Optional[str] = None
+    refresh_token_secret: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _one_source_each(self):
+        _one_source(self, "client_secret")
+        _one_source(self, "refresh_token")
+        return self
 
 
 class ExchangeConnection(_Strict):
     tenant_id: str
     client_id: str
-    client_secret: str
+    client_secret: Optional[str] = None
+    client_secret_secret: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _one_client_secret(self):
+        _one_source(self, "client_secret")
+        return self
 
 
 class Account(_Strict):
@@ -77,6 +108,8 @@ class Account(_Strict):
     imap: Optional[ImapConnection] = None
     gmail: Optional[GmailConnection] = None
     exchange: Optional[ExchangeConnection] = None
+    # Set by parse_config, not in the YAML: why the account cannot be used.
+    unavailable: Optional[str] = None
 
     @model_validator(mode="after")
     def _connection_matches_provider(self):
@@ -124,11 +157,12 @@ class SmioConfig(_Strict):
         raise ValueError(f"Unknown account: {account_id!r}")
 
 
-def _expand_env(value):
+def _expand_env(value, missing=None):
+    """Replace ${VAR} references; unset ones raise, or go to `missing` as ""."""
     if isinstance(value, dict):
-        return {key: _expand_env(item) for key, item in value.items()}
+        return {key: _expand_env(item, missing) for key, item in value.items()}
     if isinstance(value, list):
-        return [_expand_env(item) for item in value]
+        return [_expand_env(item, missing) for item in value]
     if not isinstance(value, str):
         return value
 
@@ -136,37 +170,104 @@ def _expand_env(value):
         name, default = match.groups()
         resolved = os.getenv(name)
         if resolved is None or resolved == "":
-            if default is None:
+            if default is not None:
+                return default
+            if missing is None:
                 raise ValueError(f"Environment variable {name} is not set")
-            return default
+            missing.append(name)
+            return ""
         return resolved
 
     return _ENV_REFERENCE.sub(replace, value)
 
 
+def _expand_account(account):
+    """Expand one account; an unset variable makes only this account unavailable."""
+    missing = []
+    expanded = _expand_env(account, missing)
+    if missing and isinstance(expanded, dict):
+        expanded["unavailable"] = (
+            f"environment variable(s) not set: {', '.join(dict.fromkeys(missing))}"
+        )
+        logger.error("Account %r is unavailable: %s", expanded.get("id"), expanded["unavailable"])
+    return expanded
+
+
 def parse_config(text):
-    return SmioConfig.model_validate(_expand_env(yaml.safe_load(text) or {}))
+    data = yaml.safe_load(text) or {}
+    if isinstance(data, dict) and isinstance(data.get("accounts"), list):
+        # Per account, so one unset variable leaves the others usable. An
+        # unavailable account keeps its place: the primary stays the first one.
+        accounts = [_expand_account(account) for account in data["accounts"]]
+        data = {key: value for key, value in data.items() if key != "accounts"}
+        return SmioConfig.model_validate({**_expand_env(data), "accounts": accounts})
+    return SmioConfig.model_validate(_expand_env(data))
 
 
-def _sync_from_gcs():
-    if not gcs.enabled():
-        return
-    if not gcs.download_file(CONFIG_GCS_OBJECT, CONFIG_PATH):
-        logger.info("No config in GCS at %s; uploading the local one", CONFIG_GCS_OBJECT)
+def _reads_from_gcs():
+    """Only the deployed service reads GCS; scripts and local runs use their file."""
+    service = os.getenv("K_SERVICE") or os.getenv("SMIO_CONFIG_SOURCE") == "gcs"
+    return bool(service) and gcs.enabled()
+
+
+def _gcs_config_text():
+    """The service's config from GCS, or None to use the bundled file.
+
+    Kept in memory: the bundled file is read-only in the image and stays the
+    initial upload and the fallback.
+    """
+    text = gcs.download_text(CONFIG_GCS_OBJECT)
+    if text is None:
+        logger.info("No config in GCS at %s; uploading the bundled one", CONFIG_GCS_OBJECT)
         gcs.upload_file(CONFIG_PATH, CONFIG_GCS_OBJECT)
+    return text
+
+
+def _parse_and_check(text, check):
+    config = parse_config(text)
+    if check is not None:
+        check(config)
+    return config
+
+
+def _load_config(startup, check):
+    if _reads_from_gcs():
+        try:
+            # Downloaded inside the try: a copy that is not UTF-8 fails here.
+            text = _gcs_config_text()
+            if text is not None:
+                return _parse_and_check(text, check)
+        except (ValueError, yaml.YAMLError):
+            if not startup:
+                raise
+            # Nothing to keep yet: run on the bundled config rather than not at all.
+            logger.exception(
+                "Invalid SMIO config in GCS at %s; using the bundled %s",
+                CONFIG_GCS_OBJECT, CONFIG_PATH,
+            )
+    # At startup there is nothing to keep, so the file is used unchecked:
+    # accounts it lacks, e.g. added to the GCS copy only, are left alone until
+    # the GCS copy is fixed instead of every account stopping, and scripts that
+    # need only the folder lists still run.
+    text = CONFIG_PATH.read_text(encoding="utf-8")
+    return _parse_and_check(text, None if startup else check)
 
 
 _config = None
 _config_lock = Lock()
 
 
-def reload_config():
-    """Re-read the configuration (from GCS when enabled) and return it."""
+def reload_config(check=None):
+    """Re-read the configuration and return it.
+
+    check(config) may raise ValueError to reject the new config. A broken or
+    rejected config keeps the previous one; at startup a broken or rejected
+    GCS copy falls back to the bundled file, which is used unchecked.
+    """
     global _config
     with _config_lock:
         try:
-            _sync_from_gcs()
-            _config = parse_config(CONFIG_PATH.read_text(encoding="utf-8"))
+            _config = _load_config(startup=_config is None, check=check)
         except Exception:
             if _config is None:
                 raise
@@ -176,7 +277,31 @@ def reload_config():
 
 
 def get_config():
-    return _config or reload_config()
+    # The service's GCS copy is checked like the workflow's reloads: a renamed
+    # id accepted here would be kept by every later reload that rejects it.
+    return _config or reload_config(check=require_stored_account_ids)
+
+
+def require_account_ids(config, account_ids):
+    """Reject a config without all of these account ids; a reload check.
+
+    Stored mails are identified by their account id: a renamed id would import
+    that inbox again as new mail and orphan the stored rows.
+    """
+    missing = set(account_ids) - {account.id for account in config.accounts}
+    if missing:
+        raise ValueError(
+            f"Accounts {', '.join(sorted(missing))} have stored mails but are not "
+            "configured; account ids must never change"
+        )
+
+
+def require_stored_account_ids(config):
+    """require_account_ids for the mails in the database; a reload check."""
+    # Imported here: src.db.database imports this module.
+    from src.db.database import stored_account_ids
+
+    require_account_ids(config, stored_account_ids())
 
 
 def primary_account():

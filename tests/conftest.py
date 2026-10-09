@@ -11,7 +11,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 # Keep tests offline: no GCS, a throwaway SQLite file, dummy IMAP credentials.
-os.environ.pop("GCS_BUCKET", None)
+# GCS_BUCKET is set empty rather than removed so src.config's load_dotenv cannot
+# fill it in from a developer's .env and point the tests at the real bucket.
+os.environ["GCS_BUCKET"] = ""
 os.environ.setdefault("SQLITE_DB_PATH", str(ROOT / "tmp" / "test-smio.db"))
 os.environ.setdefault("IMAP_HOST", "imap.test")
 os.environ.setdefault("IMAP_USER", "owner@test")
@@ -49,6 +51,14 @@ _stub(
     restore_previous_model=lambda: {},
     retrain_if_due=lambda db, **kwargs: {},
 )
+
+
+@pytest.fixture(autouse=True)
+def offline_secrets(monkeypatch):
+    """The repository config reads the IMAP password from Secret Manager."""
+    from src.storage import secret_store
+
+    monkeypatch.setattr(secret_store, "_cache", {"imap-password": "secret"})
 
 
 @pytest.fixture

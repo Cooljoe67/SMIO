@@ -36,9 +36,10 @@ def test_env_references_are_expanded_with_defaults():
     assert account.user_first_name == "there"
 
 
-def test_missing_env_reference_is_rejected():
+def test_missing_env_reference_outside_accounts_is_rejected():
+    # Inside an account it only makes that account unavailable (test_config_loading.py).
     with pytest.raises(ValueError, match="SMIO_TEST_UNSET"):
-        config.parse_config(BASE.replace("${IMAP_HOST}", "${SMIO_TEST_UNSET}"))
+        config.parse_config(BASE.replace("delivery: {", "delivery: {folder: '${SMIO_TEST_UNSET}', "))
 
 
 @pytest.mark.parametrize(
@@ -95,10 +96,16 @@ def test_scripts_can_load_the_config_without_the_imap_password(monkeypatch):
     from src.api.utils import imap_client
 
     monkeypatch.delenv("IMAP_PASSWORD")
-    parsed = config.parse_config(config.CONFIG_PATH.read_text(encoding="utf-8"))
+    text = config.CONFIG_PATH.read_text(encoding="utf-8")
+    # The secret is read only at login.
+    assert config.parse_config(text).accounts[0].imap.password_secret == "imap-password"
 
-    with pytest.raises(RuntimeError, match="no IMAP password"):
-        imap_client.open_mailbox(parsed.accounts[0])
+    # The documented alternative for local runs without Google Cloud.
+    local = config.parse_config(
+        text.replace("password_secret: imap-password", "password: ${IMAP_PASSWORD}")
+    )
+    with pytest.raises(RuntimeError, match="unavailable: environment variable.*IMAP_PASSWORD"):
+        imap_client.open_mailbox(local.accounts[0])
 
 
 def test_repository_config_is_valid():

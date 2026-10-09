@@ -1,11 +1,16 @@
 # SMIO configuration: folder lists and mail accounts.
 #
-# In production this file is read from GCS (GCS_CONFIG_OBJECT, default
+# The deployed service reads this file from GCS (GCS_CONFIG_OBJECT, default
 # config/smio.yaml) at the start of every workflow run, so changes apply
-# without a redeploy. This copy is the local default and the initial upload.
+# without a redeploy. This copy is what scripts and local runs use, the
+# initial upload, and the service's fallback if the GCS copy is invalid when
+# it starts.
 #
-# Never put secrets here. Use ${ENV_VAR} (or ${ENV_VAR:-default}) to read
-# values from the environment / .env instead.
+# Never put secrets here. Give a credential as the name of a Google Secret
+# Manager secret (password_secret, client_secret_secret, ...), read when the
+# account logs in, or use ${ENV_VAR} (or ${ENV_VAR:-default}) to read a value
+# from the environment / .env. An account whose ${ENV_VAR}s are not set is
+# skipped and reported; the other accounts keep running.
 
 # Each folder list is named after the classifier model trained for it. Its
 # keys (plus the implicit "other", which stays in the inbox) are the model's
@@ -45,6 +50,9 @@ folder_lists:
     partner: {folder: "Partner & Dienstleister"}
     marketing: {folder: "Marketing & Newsletter", retention_days: 10}
 
+# An account id identifies its stored mails: never change it, or the inbox is
+# imported again as new mail. The service rejects a GCS copy that drops the id
+# of stored mails and keeps its previous config (at startup: this file).
 accounts:
   - id: primary
     provider: imap            # imap | gmail | exchange (gmail and exchange: not yet supported)
@@ -59,8 +67,12 @@ accounts:
     imap:
       host: ${IMAP_HOST}
       username: ${IMAP_USER}
-      # Only needed to log in, so scripts that never touch the mailbox run without it.
-      password: ${IMAP_PASSWORD:-}
+      # Read from Secret Manager at login. For local runs without Google Cloud
+      # use instead:  password: ${IMAP_PASSWORD}
+      password_secret: imap-password
+
+  # More IMAP accounts: scripts/add_account.ps1 stores the password as the
+  # secret imap-<id>-password and prints the entry to add to the GCS copy.
 
   # Gmail (OAuth2 client of a Google Cloud project, refresh token per mailbox):
   # - id: gmail-example
@@ -70,8 +82,8 @@ accounts:
   #   mailbox: {inbox: INBOX, folder_root: smio, trash: "[Gmail]/Trash"}
   #   gmail:
   #     client_id: ${GMAIL_CLIENT_ID}
-  #     client_secret: ${GMAIL_CLIENT_SECRET}
-  #     refresh_token: ${GMAIL_EXAMPLE_REFRESH_TOKEN}
+  #     client_secret_secret: gmail-client-secret
+  #     refresh_token_secret: gmail-example-refresh-token
 
   # Microsoft Exchange Online (Entra ID app registration with Mail.ReadWrite):
   # - id: exchange-example
@@ -82,4 +94,4 @@ accounts:
   #   exchange:
   #     tenant_id: ${EXCHANGE_TENANT_ID}
   #     client_id: ${EXCHANGE_CLIENT_ID}
-  #     client_secret: ${EXCHANGE_CLIENT_SECRET}
+  #     client_secret_secret: exchange-example-client-secret
