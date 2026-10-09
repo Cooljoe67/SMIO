@@ -347,6 +347,9 @@ def parse_args():
 
 def main():
     options = parse_args()
+    if options.publish and not gcs.enabled():
+        # Fail now rather than after hours of training.
+        raise SystemExit("--publish needs GCS, but GCS_BUCKET is not set; nothing was trained.")
     # Labelled data may be in a database the service has not migrated yet.
     Base.metadata.create_all(bind=engine)
     ensure_email_columns()

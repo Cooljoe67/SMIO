@@ -210,3 +210,14 @@ def test_main_migrates_a_database_from_before_folder_lists(training):
 
     (final,) = training.final_trainers
     assert len(final.train_dataset.texts) == 20
+
+
+def test_publish_without_gcs_fails_before_loading_data(training, monkeypatch, script):
+    def load_data(*args, **kwargs):
+        raise AssertionError("data loaded although the model cannot be published")
+
+    monkeypatch.setattr(script.gcs, "enabled", lambda: False)
+    monkeypatch.setattr(script, "load_data", load_data)
+
+    with pytest.raises(SystemExit, match="GCS_BUCKET"):
+        training.main("--publish")
