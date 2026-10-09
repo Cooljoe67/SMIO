@@ -265,6 +265,32 @@ def test_an_unusable_answer_skips_only_that_reply(db, api, monkeypatch):
     assert all(reply.reply_checked_at is not None for reply in replies)
 
 
+def test_an_unexpected_error_skips_only_that_reply_and_keeps_earlier_decisions(db, haiku, monkeypatch, caplog):
+    assess = reply_status.assess_reply
+
+    def flaky(original, reply, reply_is_ours):
+        if reply.message_id == "<broken@test>":
+            raise KeyError("boom")
+        return assess(original, reply, reply_is_ours)
+
+    monkeypatch.setattr(reply_status, "assess_reply", flaky)
+    first = _received(db, "<a@test>", status="Zu erledigen")
+    done = _reply(db, "<done@test>", in_reply_to="<a@test>")
+    second = _received(db, "<b@test>", status="Zu erledigen")
+    broken = _reply(db, "<broken@test>", in_reply_to="<b@test>", date=SENT + timedelta(hours=2))
+    later = _reply(db, "<later@test>", in_reply_to="<b@test>", date=SENT + timedelta(hours=3))
+
+    result = reply_tracking.update_statuses_from_replies(db, primary_account())
+
+    assert (result["updated"], result["failed"]) == (2, 1)
+    assert any(record.exc_info for record in caplog.records)
+    # The broken reply's rollback must not undo the decision committed before it.
+    db.rollback()
+    assert (first.status, done.reply_to_id) == ("Abgeschlossen", first.id)
+    assert broken.reply_checked_at is not None and broken.reply_to_id is None
+    assert (second.status, later.reply_to_id) == ("Abgeschlossen", second.id)
+
+
 # ---------- Claude call ----------
 
 class FakeMessages:

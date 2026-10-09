@@ -80,6 +80,23 @@ def apply_decision(target, decision):
     return "suggested"
 
 
+def _check_reply(db, account, reply):
+    """Link one reply and apply Haiku's decision; returns the outcome."""
+    target = _thread_target(db, account, reply)
+    if target is None or _is_own(target, account) or target.classification_source == "system":
+        reply.reply_checked_at = _now()
+        return "unlinked"
+    decision = reply_status.assess_reply(target, reply, reply_is_ours=_is_own(reply, account))
+    reply.reply_to_id = target.id
+    reply.reply_checked_at = _now()
+    outcome = apply_decision(target, decision)
+    logger.info(
+        "Email %s: reply %s -> %s %s (%.2f)",
+        target.id, reply.id, outcome, decision.status, decision.confidence,
+    )
+    return outcome
+
+
 def update_statuses_from_replies(db, account):
     """Check new replies of an account; returns counts per outcome."""
     result = {"updated": 0, "suggested": 0, "unlinked": 0, "failed": 0, "waiting": 0}
@@ -91,13 +108,8 @@ def update_statuses_from_replies(db, account):
         return result
 
     for reply in pending:
-        target = _thread_target(db, account, reply)
-        if target is None or _is_own(target, account) or target.classification_source == "system":
-            reply.reply_checked_at = _now()
-            result["unlinked"] += 1
-            continue
         try:
-            decision = reply_status.assess_reply(target, reply, reply_is_ours=_is_own(reply, account))
+            outcome = _check_reply(db, account, reply)
         except reply_status.StatusCheckError as error:
             result["failed"] += 1
             if error.kind == "fatal":
@@ -109,14 +121,14 @@ def update_statuses_from_replies(db, account):
                 # Rate limit or outage: stop and try again next run.
                 break
             reply.reply_checked_at = _now()
-            continue
-        reply.reply_to_id = target.id
-        reply.reply_checked_at = _now()
-        outcome = apply_decision(target, decision)
-        result[outcome] += 1
-        logger.info(
-            "Email %s: reply %s -> %s %s (%.2f)",
-            target.id, reply.id, outcome, decision.status, decision.confidence,
-        )
-    db.commit()
+        except Exception:
+            # One broken reply must not block the others; drop its partial changes.
+            logger.exception("Status check for reply %s failed", reply.id)
+            db.rollback()
+            reply.reply_checked_at = _now()
+            result["failed"] += 1
+        else:
+            result[outcome] += 1
+        # Each decision is a paid call; keep it even if a later reply fails.
+        db.commit()
     return result
