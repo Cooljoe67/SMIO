@@ -37,7 +37,7 @@ accounts:
 def accounts(monkeypatch):
     parsed = config.parse_config(ACCOUNTS)
     monkeypatch.setattr(config, "_config", parsed)
-    monkeypatch.setattr(workflows, "reload_config", lambda: None)
+    monkeypatch.setattr(workflows, "reload_config", lambda **kwargs: None)
     return parsed.accounts
 
 
