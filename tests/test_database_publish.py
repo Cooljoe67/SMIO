@@ -23,6 +23,7 @@ def uploads(tmp_path, monkeypatch):
     monkeypatch.setattr(database, "USING_SQLITE", True)
     monkeypatch.setattr(database, "_published_signature", database._database_signature())
     monkeypatch.setattr(database.gcs, "enabled", lambda: True)
+    monkeypatch.setenv("K_SERVICE", "smio")
     monkeypatch.setattr(workflows, "reload_config", lambda **kwargs: None)
     monkeypatch.setattr(
         database.gcs,
@@ -147,3 +148,23 @@ def test_sqlite_reads_leave_the_file_unchanged_and_writes_change_it(tmp_path, mo
         session.commit()
     assert database._database_signature() != before
     engine.dispose()
+
+
+@pytest.mark.parametrize("service, source, expected", [
+    ("smio", None, True),
+    (None, "gcs", True),
+    (None, None, False),
+])
+def test_only_the_service_or_an_explicit_opt_in_syncs_the_database(
+    uploads, monkeypatch, service, source, expected
+):
+    path, calls = uploads
+    for variable, value in (("K_SERVICE", service), ("SMIO_DB_SOURCE", source)):
+        if value:
+            monkeypatch.setenv(variable, value)
+        else:
+            monkeypatch.delenv(variable, raising=False)
+    _write(path, b"v2")
+
+    assert database.persist_database() is expected
+    assert len(calls) == int(expected)

@@ -28,7 +28,18 @@ def _database_signature():
     return stat.st_mtime_ns, stat.st_size
 
 
-if gcs.enabled() and USING_SQLITE:
+def _syncs_with_gcs():
+    """Only the deployed service mirrors the database through GCS.
+
+    .env is loaded by every process, so GCS_BUCKET alone would make local scripts
+    replace ./smio.db with the production copy and upload their changes over it.
+    Set SMIO_DB_SOURCE=gcs to opt in locally (with the service idle).
+    """
+    service = os.getenv("K_SERVICE") or os.getenv("SMIO_DB_SOURCE") == "gcs"
+    return bool(service) and gcs.enabled() and USING_SQLITE
+
+
+if _syncs_with_gcs():
     if not gcs.download_file(DATABASE_GCS_OBJECT, DATABASE_PATH) and DATABASE_PATH.exists():
         gcs.upload_file(DATABASE_PATH, DATABASE_GCS_OBJECT)
     _published_signature = _database_signature()
@@ -47,7 +58,7 @@ def persist_database():
     commit: each upload sends the whole file. Returns whether it uploaded.
     """
     global _published_signature
-    if not (gcs.enabled() and USING_SQLITE):
+    if not _syncs_with_gcs():
         return False
     with _publish_lock:
         # Read the signature before uploading so a write during the upload is

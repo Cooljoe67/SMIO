@@ -389,12 +389,14 @@ GCS like the service). An invalid GCS edit keeps the previous config; if the ser
 starts with an invalid GCS copy it runs on the bundled file, so accounts listed only
 in the GCS copy wait until it is fixed. Errors are logged.
 
-`.env` is loaded by every SMIO process, so a `GCS_BUCKET` there also makes local
-scripts and a local server download and upload the production database and models:
-each start replaces the local `smio.db` with the production copy, so rows imported
-by one script are gone when the next one starts. Keep it out of `.env` on machines
-that run SMIO locally against their own `smio.db`, and pass `-GcsBucket` to
-`deploy.ps1` and `add_account.ps1` there instead.
+`.env` is loaded by every SMIO process, but only the deployed service (`K_SERVICE`
+set by Cloud Run) syncs the SQLite database and the config with GCS. Local scripts and
+a local server keep using `./smio.db` and the checked-out `config/smio.yaml` even with
+`GCS_BUCKET` in `.env`, which `deploy.ps1`, `add_account.ps1` and `--publish` need.
+To work on the production database locally, set `SMIO_DB_SOURCE=gcs` for that run, and
+only while the service is idle (scheduler paused): the run downloads the production
+copy at start and uploads its changes, overwriting whatever the service wrote meanwhile.
+`scripts/sync_database_with_gcs.py` is the guided way to do the same.
 
 ### Mail accounts and credentials
 
