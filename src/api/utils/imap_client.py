@@ -100,7 +100,10 @@ def move_email_to_classification_folder(mailbox, email, account):
         # Already there; a MOVE within one folder would only renumber it.
         return None
     if _verify_uid(mailbox, email, source_folder) is None:
-        raise ValueError(f"Email {email.id} is no longer in {source_folder}")
+        # Moved or deleted since the sync; the next sync records which. Raising
+        # would leave it unprocessed and fail again on every run.
+        logger.warning("Email %s is no longer in %s; not moving it", email.id, source_folder)
+        return None
 
     if not mailbox.folder.exists(destination):
         mailbox.folder.create(destination)

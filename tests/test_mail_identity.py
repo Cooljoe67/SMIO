@@ -202,6 +202,30 @@ def test_processing_only_takes_mails_still_in_the_inbox(db, server, monkeypatch)
     assert mailbox.moves == [("INBOX", "INBOX/tech")]
 
 
+def test_mail_moved_by_the_user_during_processing_is_finished_and_corrected_by_the_next_sync(
+    db, server, monkeypatch
+):
+    mailbox = server(**{"INBOX": [_message("1")], "INBOX/delivery": [], "INBOX/tech": []})
+    _sync()
+    mailbox.move(["1"], "INBOX/delivery")
+    _predict(monkeypatch, mailbox, "tech")
+
+    _, results, errors = inbox_processor.process_unprocessed_emails(db, primary_account())
+
+    email = db.query(Email).one()
+    assert errors == [] and "folder" not in results[0]
+    assert mailbox.moves == [("INBOX", "INBOX/delivery")]
+    assert (email.folder, email.processed) == ("INBOX", 1)
+    assert inbox_processor.process_unprocessed_emails(db, primary_account())[1:] == ([], [])
+
+    _sync()
+
+    email = db.query(Email).one()
+    assert (email.folder, email.true_label, email.classification_source) == (
+        "INBOX/delivery", "delivery", "imap_folder"
+    )
+
+
 def test_mail_already_in_its_folder_is_not_moved(db, server):
     mailbox = server(**{"INBOX": [], "INBOX/tech": [_message("1")]})
     email = Email(id=1, account="primary", uid="1", message_id="<a@test>", folder="INBOX/tech", classification="tech")
