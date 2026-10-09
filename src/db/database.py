@@ -190,8 +190,8 @@ def ensure_email_columns():
 
 def stored_account_ids():
     """The accounts that stored mails belong to; none before the migration."""
-    # Every first config load asks, and scripts may load it before creating
-    # or migrating the tables.
+    # The first load of a GCS config asks, and it may come before the tables
+    # are created or from inside their migration.
     inspector = inspect(engine)
     if not inspector.has_table("emails") or "account" not in {
         column["name"] for column in inspector.get_columns("emails")

@@ -245,7 +245,12 @@ def _load_config(startup, check):
                 "Invalid SMIO config in GCS at %s; using the bundled %s",
                 CONFIG_GCS_OBJECT, CONFIG_PATH,
             )
-    return _parse_and_check(CONFIG_PATH.read_text(encoding="utf-8"), check)
+    # At startup there is nothing to keep, so the file is used unchecked:
+    # accounts it lacks, e.g. added to the GCS copy only, are left alone until
+    # the GCS copy is fixed instead of every account stopping, and scripts that
+    # need only the folder lists still run.
+    text = CONFIG_PATH.read_text(encoding="utf-8")
+    return _parse_and_check(text, None if startup else check)
 
 
 _config = None
@@ -257,7 +262,7 @@ def reload_config(check=None):
 
     check(config) may raise ValueError to reject the new config. A broken or
     rejected config keeps the previous one; at startup a broken or rejected
-    GCS copy falls back to the bundled file, which must pass the check too.
+    GCS copy falls back to the bundled file, which is used unchecked.
     """
     global _config
     with _config_lock:
@@ -272,8 +277,8 @@ def reload_config(check=None):
 
 
 def get_config():
-    # Checked like the workflow's reloads: a renamed id accepted here would be
-    # kept by every later reload that rejects it.
+    # The service's GCS copy is checked like the workflow's reloads: a renamed
+    # id accepted here would be kept by every later reload that rejects it.
     return _config or reload_config(check=require_stored_account_ids)
 
 

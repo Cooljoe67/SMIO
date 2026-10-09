@@ -15,8 +15,6 @@ sys.path.insert(0, str(ROOT))
 # fill it in from a developer's .env and point the tests at the real bucket.
 os.environ["GCS_BUCKET"] = ""
 os.environ.setdefault("SQLITE_DB_PATH", str(ROOT / "tmp" / "test-smio.db"))
-# The first config load checks the stored account ids, so the database must open.
-Path(os.environ["SQLITE_DB_PATH"]).parent.mkdir(exist_ok=True)
 os.environ.setdefault("IMAP_HOST", "imap.test")
 os.environ.setdefault("IMAP_USER", "owner@test")
 os.environ.setdefault("IMAP_PASSWORD", "secret")

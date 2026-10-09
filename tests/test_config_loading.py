@@ -233,7 +233,7 @@ def test_schema_migration_reads_the_config_only_for_unassigned_mails(tmp_path, m
     engine.dispose()
 
 
-def test_migration_can_be_the_first_config_load(tmp_path, monkeypatch):
+def test_migration_can_be_the_first_config_load(tmp_path, bucket, monkeypatch):
     engine = create_engine(f"sqlite:///{(tmp_path / 'smio.db').as_posix()}")
     with engine.begin() as connection:
         # A database from before multi-account support.
@@ -244,9 +244,9 @@ def test_migration_can_be_the_first_config_load(tmp_path, monkeypatch):
         connection.execute(text("INSERT INTO emails (processed, uid) VALUES (1, '5')"))
     monkeypatch.setattr(database, "engine", engine)
     monkeypatch.setattr(database, "persist_database", lambda: False)
-    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "smio.yaml")
-    config.CONFIG_PATH.write_text(BUNDLED, encoding="utf-8")
-    monkeypatch.setattr(config, "_config", None)
+    # The service checks its first GCS copy against the stored account ids.
+    monkeypatch.setenv("K_SERVICE", "smio")
+    bucket[config.CONFIG_GCS_OBJECT] = _config_text("Remote")
 
     database.ensure_email_columns()
 
@@ -316,15 +316,16 @@ def test_first_load_outside_the_workflow_rejects_a_renamed_gcs_account(tmp_path,
     engine.dispose()
 
 
-def test_first_load_refuses_a_local_config_without_a_stored_account(tmp_path, monkeypatch):
-    engine = _database_with_accounts(tmp_path, "primary")
+def test_scripts_load_their_file_when_other_accounts_have_stored_mails(tmp_path, monkeypatch):
+    # With GCS_BUCKET in .env a script opens the production database, which
+    # also holds the mails of accounts added to the GCS copy only.
+    engine = _database_with_accounts(tmp_path, "primary", "second")
     monkeypatch.setattr(database, "engine", engine)
     monkeypatch.setattr(config, "_config", None)
-    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "renamed.yaml")
-    config.CONFIG_PATH.write_text(RENAMED, encoding="utf-8")
+    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "smio.yaml")
+    config.CONFIG_PATH.write_text(BUNDLED, encoding="utf-8")
 
-    with pytest.raises(ValueError, match="primary have stored mails"):
-        config.get_config()
+    assert list(config.get_config().folder_lists["default"]) == ["delivery"]
     engine.dispose()
 
 
@@ -337,14 +338,44 @@ def test_rejected_gcs_config_at_startup_falls_back_to_the_bundled_one(bucket, mo
     assert [account.id for account in loaded.accounts] == ["primary"]
 
 
-def test_bundled_fallback_is_checked_like_the_gcs_copy(bucket, monkeypatch):
-    monkeypatch.setenv("K_SERVICE", "smio")
-    bucket[config.CONFIG_GCS_OBJECT] = "folder_lists: ["
-    config.CONFIG_PATH.chmod(0o644)
-    config.CONFIG_PATH.write_text(RENAMED, encoding="utf-8")
+SECOND_IN_GCS = _config_text("Remote") + """
+  - id: second
+    provider: imap
+    email: second@test
+    folder_list: default
+    imap: {host: imap.second, username: second@test, password_secret: imap-second-password}
+"""
 
-    with pytest.raises(ValueError, match="primary have stored mails"):
-        config.reload_config(check=lambda new: config.require_account_ids(new, {"primary"}))
+
+@pytest.mark.parametrize(
+    "gcs_copy",
+    [SECOND_IN_GCS + "  - {id: [\n", _config_text("Remote")],
+    ids=["broken", "account-removed"],
+)
+def test_service_starts_on_the_bundled_file_without_accounts_only_in_gcs(
+    tmp_path, bucket, monkeypatch, caplog, gcs_copy
+):
+    # 'second' was added to the GCS copy only, as add_account.ps1 says, and
+    # has stored mails; the bundled file does not list it.
+    engine = _database_with_accounts(tmp_path, "primary", "second")
+    monkeypatch.setattr(database, "engine", engine)
+    monkeypatch.setattr(workflows, "persist_database", lambda: False)
+    monkeypatch.setenv("K_SERVICE", "smio")
+    bucket[config.CONFIG_GCS_OBJECT] = gcs_copy
+
+    with caplog.at_level(logging.ERROR, logger="src.config"):
+        started = workflows._run_exclusively("test", config.get_config)
+
+    assert [account.id for account in started.accounts] == ["primary"]
+    assert started.accounts[0].user_first_name == "Bundled"
+    assert "Invalid SMIO config in GCS" in caplog.text
+
+    # Fixing the GCS copy brings 'second' back on the next run.
+    bucket[config.CONFIG_GCS_OBJECT] = SECOND_IN_GCS
+    fixed = workflows._run_exclusively("test", config.get_config)
+
+    assert [account.id for account in fixed.accounts] == ["primary", "second"]
+    engine.dispose()
 
 
 def test_gcs_bucket_is_read_when_used(monkeypatch):
