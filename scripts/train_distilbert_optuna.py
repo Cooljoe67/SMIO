@@ -70,7 +70,11 @@ BASE_OUTPUT_DIR = "./models/distilbert_optuna"
 STUDY_STORAGE = "sqlite:///optuna_distilbert.db"   # persistent Optuna DB
 
 NUM_FOLDS = 5
-NUM_TRAIN_EPOCHS = 4
+# Upper bound; early stopping picks each fold's best epoch below it.
+NUM_TRAIN_EPOCHS = 10
+LEARNING_RATE_RANGE = (2e-5, 1e-4)
+# Epochs without improvement before a fold stops; small folds score noisily.
+EARLY_STOPPING_PATIENCE = 2
 MAX_LENGTH = 256
 BATCH_SIZE = 16
 WARMUP_RATIO = 0.15
@@ -178,16 +182,19 @@ def load_data(db, folder_list, label2id, holdout=False, input_format=BODY):
 
 
 def data_fingerprint(ids, labels, label2id, num_folds):
-    """Hash of the training mails, their labels and the folds.
+    """Hash of the training mails, their labels, the folds and the search settings.
 
     Part of the study name: a persisted trial's out-of-fold predictions belong
-    to the mails it was run on, so trials of other data must not be reused.
+    to the mails and settings it was run with, so other trials must not be reused.
     """
     payload = json.dumps([
         sorted(zip(ids, labels)),
         sorted(label2id.items()),
         num_folds,
         RANDOM_STATE,
+        NUM_TRAIN_EPOCHS,
+        LEARNING_RATE_RANGE,
+        EARLY_STOPPING_PATIENCE,
     ])
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
 
@@ -270,7 +277,7 @@ def _best_epoch(trainer):
 
 def objective(trial, data, tokenizer, class_weights, options):
     texts, labels, folds, label2id = data
-    learning_rate = trial.suggest_float("learning_rate", 2e-5, 4e-5, log=True)
+    learning_rate = trial.suggest_float("learning_rate", *LEARNING_RATE_RANGE, log=True)
 
     out_of_fold = np.full(len(labels), -1)
     fold_scores = []
@@ -287,7 +294,7 @@ def objective(trial, data, tokenizer, class_weights, options):
                 [texts[i] for i in val_idx], [labels[i] for i in val_idx], tokenizer, MAX_LENGTH
             ),
             compute_metrics=compute_metrics,
-            callbacks=[EarlyStoppingCallback(early_stopping_patience=1)],
+            callbacks=[EarlyStoppingCallback(early_stopping_patience=EARLY_STOPPING_PATIENCE)],
         )
         trainer.train()
         predictions = np.argmax(trainer.predict(trainer.eval_dataset).predictions, axis=-1)
