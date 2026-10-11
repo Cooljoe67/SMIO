@@ -21,7 +21,12 @@ UNLABELLED = (
     "Z-2\tTEST\t\tINTERNAL\tK. Meier\tk.meier@rc.de\talle@rc.de\tTeam\tInfo\t\tja\tnein\tnein"
     "\t\tEASY" + "\t" * 15
 )
-OTHER = LABELLED.replace("Z-1", "Z-3").replace("Dokumente & Frachtpapiere", "Sonstiges")
+# Escalations need action, but no reply: they stay in the inbox.
+OTHER = (
+    LABELLED.replace("Z-1", "Z-3")
+    .replace("Dokumente & Frachtpapiere", "Sonstiges")
+    .replace("Bestätigung erforderlich", "Weiterleiten/Eskalieren")
+)
 
 
 def _write(tmp_path, *rows):
@@ -39,7 +44,8 @@ def test_rows_are_imported_as_labelled_training_data(db, tmp_path):
 
     labelled, unlabelled, other = db.query(Email).order_by(Email.dataset_key).all()
     assert labelled.folder_list == "logistics"
-    assert labelled.true_label == labelled.classification == "dokumente"
+    # Confirming a document is answered by writing back.
+    assert labelled.true_label == labelled.classification == "zu_beantworten"
     assert labelled.classification_source == "dataset"
     assert (labelled.true_status, labelled.true_mail_type_2) == ("Zu erledigen", "Rückfrage")
     assert labelled.classification_reason == "Gefahrgutpapiere zur Prüfung."
@@ -53,6 +59,24 @@ def test_rows_are_imported_as_labelled_training_data(db, tmp_path):
     assert unlabelled.true_label is None and unlabelled.classification is None
     assert unlabelled.is_own_domain_sender is True
     assert other.true_label == "other"
+
+
+@pytest.mark.parametrize(
+    "folder, priority, action, mail_type, label",
+    [
+        ("Rechnungen & Abrechnung", "Dringend", "Antwort erforderlich", "Abrechnung", "dringend"),
+        ("Marketing & Newsletter", "Normal", "Antwort erforderlich", "Newsletter/Werbung", "marketing"),
+        ("Rechnungen & Abrechnung", "Normal", "Keine Aktion", "Abrechnung", "rechnungen"),
+        ("Dokumente & Frachtpapiere", "Hoch", "Keine Aktion", "Dokument", "transportdokumente"),
+        ("Transportabwicklung", "Normal", "Keine Aktion", "Statusupdate", "statusmeldung"),
+        ("Sonstiges", "Normal", "Keine Aktion", "Information/FYI", "zur_kenntnis"),
+        ("Schäden & Ereignisse", "Hoch", "Reklamation bearbeiten", "Reklamation", "other"),
+    ],
+)
+def test_label_follows_the_first_matching_rule(folder, priority, action, mail_type, label):
+    row = {"FOLDER": folder, "PRIORITY": priority, "ACTION": action, "MAIL_TYPE_1": mail_type}
+
+    assert import_labelled_tsv.dataset_label(row) == label
 
 
 def test_reimport_updates_rows_instead_of_duplicating(db, tmp_path):
@@ -72,7 +96,7 @@ def test_unknown_folder_is_rejected(db, tmp_path):
         import_labelled_tsv.import_tsv(db, path, "logistics")
 
 
-def test_real_dataset_folders_all_map_to_the_folder_list():
+def test_real_dataset_rows_all_map_to_the_folder_list():
     import csv
     from pathlib import Path
 
@@ -81,9 +105,13 @@ def test_real_dataset_folders_all_map_to_the_folder_list():
         pytest.skip("dataset not present")
     labels = import_labelled_tsv.folder_labels("logistics")
     with open(path, encoding="utf-8-sig", newline="") as file:
-        names = {row["FOLDER"] for row in csv.DictReader(file, delimiter="\t") if row["FOLDER"]}
+        derived = {
+            import_labelled_tsv.dataset_label(row, prefix)
+            for row in csv.DictReader(file, delimiter="\t")
+            for prefix in ("", "VORSCHLAG_")
+        }
 
-    assert names <= set(labels)
+    assert derived - {None} == labels
 
 
 def test_own_company_is_replaced_with_a_neutral_one(db, tmp_path):

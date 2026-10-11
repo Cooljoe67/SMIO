@@ -35,20 +35,19 @@ folder_lists:
       retention_days: 10
       retention_days_unread: 20
 
-  # Logistics folders of the labelled dataset (t1a-arbeitsblatt.tsv); its
-  # "Sonstiges" is the implicit "other". Business mail is kept; only read
-  # newsletters are deleted after 10 days.
+  # Logistics folders by what a mail needs; scripts/import_labelled_tsv.py
+  # derives them from the labelled dataset (t1a-arbeitsblatt.tsv). Mails needing
+  # other action stay in the inbox ("other"). "5: Antwort ausstehend" and
+  # "6: Abgeschlossen" are filed by hand only and not part of the model yet.
+  # Business mail is kept; only read newsletters are deleted after 10 days.
   logistics:
-    transportanfragen: {folder: "Transportanfragen"}
-    transportauftraege: {folder: "Transportaufträge"}
-    transportabwicklung: {folder: "Transportabwicklung"}
-    disposition: {folder: "Disposition & Touren"}
-    dokumente: {folder: "Dokumente & Frachtpapiere"}
-    rechnungen: {folder: "Rechnungen & Abrechnung"}
-    schaeden: {folder: "Schäden & Ereignisse"}
-    stammdaten: {folder: "Stammdaten & Verträge"}
-    partner: {folder: "Partner & Dienstleister"}
-    marketing: {folder: "Marketing & Newsletter", retention_days: 10}
+    dringend: {folder: "1: Dringend"}
+    zu_beantworten: {folder: "2: Zu beantworten"}
+    zur_kenntnis: {folder: "3: Zur Kenntnis"}
+    statusmeldung: {folder: "4: Statusmeldung"}
+    marketing: {folder: "7: Marketing & Newsletter", retention_days: 10}
+    transportdokumente: {folder: "8: Transportdokumente"}
+    rechnungen: {folder: "9: Rechnungen & Belege"}
 
 # An account id identifies its stored mails: never change it, or the inbox is
 # imported again as new mail. The service rejects a GCS copy that drops the id

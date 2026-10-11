@@ -2,8 +2,9 @@
 
 Rows are matched by their key (SCHLUESSEL), so the import can be repeated after
 the file changes. Rows without a FOLDER label (the TEST split) are imported
-without labels. Folder labels are mapped from the dataset's folder names to the
-keys of a folder list in config/smio.yaml; "Sonstiges" is the implicit "other".
+without labels. The label, a key of the logistics folder list in config/smio.yaml,
+is derived from the dataset's topic folder, priority, action and mail type; the
+first matching rule in dataset_label wins.
 
 The dataset company's own domain and name are replaced with neutral ones, so a
 model trained on it does not learn one company's addresses. The company is
@@ -21,7 +22,16 @@ from src.config import get_config
 from src.db.database import SessionLocal, ensure_email_columns
 from src.db.models import Email
 
-OTHER_FOLDER_NAME = "Sonstiges"
+DATASET_FOLDERS = {
+    "Transportanfragen", "Transportaufträge", "Transportabwicklung", "Disposition & Touren",
+    "Dokumente & Frachtpapiere", "Rechnungen & Abrechnung", "Schäden & Ereignisse",
+    "Stammdaten & Verträge", "Partner & Dienstleister", "Marketing & Newsletter", "Sonstiges",
+}
+# Actions answered by writing back; escalations, approvals and complaints stay in the inbox.
+REPLY_ACTIONS = {
+    "Antwort erforderlich", "Bestätigung erforderlich", "Information anfordern",
+    "Termin abstimmen", "Transportänderung bestätigen",
+}
 BOOLEANS = {"ja": True, "nein": False}
 NEUTRAL_DOMAIN = "firma.example"
 NEUTRAL_NAME = "Firma"
@@ -46,11 +56,33 @@ def _boolean(row, column):
 
 
 def folder_labels(folder_list):
-    """Dataset folder name -> label of the folder list."""
-    rules = get_config().folder_lists[folder_list]
-    labels = {rule.folder or label: label for label, rule in rules.items()}
-    labels[OTHER_FOLDER_NAME] = "other"
-    return labels
+    """Labels of the folder list, including the implicit "other"."""
+    return set(get_config().folder_lists[folder_list]) | {"other"}
+
+
+def dataset_label(row, prefix=""):
+    """Label of a row from its true ("") or suggested ("VORSCHLAG_") columns."""
+    folder = _value(row, f"{prefix}FOLDER")
+    if folder is None:
+        return None
+    if folder not in DATASET_FOLDERS:
+        raise ValueError(f"{row['SCHLUESSEL']}: unknown dataset folder {folder!r}")
+    action = _value(row, f"{prefix}ACTION")
+    if _value(row, f"{prefix}PRIORITY") == "Dringend":
+        return "dringend"
+    if folder == "Marketing & Newsletter":
+        return "marketing"
+    if action in REPLY_ACTIONS:
+        return "zu_beantworten"
+    if folder == "Rechnungen & Abrechnung":
+        return "rechnungen"
+    if folder == "Dokumente & Frachtpapiere":
+        return "transportdokumente"
+    if _value(row, f"{prefix}MAIL_TYPE_1") == "Statusupdate":
+        return "statusmeldung"
+    if action == "Keine Aktion":
+        return "zur_kenntnis"
+    return "other"
 
 
 def own_domain(rows):
@@ -80,13 +112,11 @@ def neutralizer(domain):
     return neutralize
 
 
-def _label(row, column, labels):
-    name = _value(row, column)
-    if name is None:
-        return None
-    if name not in labels:
-        raise ValueError(f"{row['SCHLUESSEL']}: folder {name!r} is not in the folder list")
-    return labels[name]
+def _label(row, prefix, labels):
+    label = dataset_label(row, prefix)
+    if label is not None and label not in labels:
+        raise ValueError(f"{row['SCHLUESSEL']}: label {label!r} is not in the folder list")
+    return label
 
 
 def apply_row(email, row, folder_list, labels):
@@ -106,7 +136,7 @@ def apply_row(email, row, folder_list, labels):
     email.is_forward = _boolean(row, "isForward")
 
     email.folder_list = folder_list
-    email.true_label = _label(row, "FOLDER", labels)
+    email.true_label = _label(row, "", labels)
     email.true_status = _value(row, "STATUS")
     email.true_priority = _value(row, "PRIORITY")
     email.true_action = _value(row, "ACTION")
@@ -116,7 +146,7 @@ def apply_row(email, row, folder_list, labels):
     email.note = _value(row, "NOTE")
     email.traits = _value(row, "TRAITS")
 
-    email.classification = _label(row, "VORSCHLAG_FOLDER", labels)
+    email.classification = _label(row, "VORSCHLAG_", labels)
     email.classification_source = "dataset" if email.classification else None
     email.status = _value(row, "VORSCHLAG_STATUS")
     email.priority = _value(row, "VORSCHLAG_PRIORITY")

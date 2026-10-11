@@ -74,12 +74,12 @@ def test_label_ids(script):
     }
     ids = script.label_ids("logistics")
     assert ids["other"] == len(ids) - 1
-    assert sorted(ids.values()) == list(range(11))
+    assert sorted(ids.values()) == list(range(8))
 
 
 def test_load_data_only_uses_the_folder_lists_labels(db, script):
     db.add_all([
-        Email(folder_list="logistics", true_label="dokumente", text="a", case_ref="VG:1"),
+        Email(folder_list="logistics", true_label="transportdokumente", text="a", case_ref="VG:1"),
         Email(folder_list="logistics", true_label="other", text="b"),
         Email(folder_list="logistics", true_label=None, text="unlabelled"),
         Email(folder_list="default", true_label="other", text="other list"),
@@ -90,7 +90,7 @@ def test_load_data_only_uses_the_folder_lists_labels(db, script):
     texts, labels, groups, _ = script.load_data(db, "logistics", ids)
 
     assert texts == ["a", "b"]
-    assert labels == [ids["dokumente"], ids["other"]]
+    assert labels == [ids["transportdokumente"], ids["other"]]
     assert groups[0] == "VG:1" and groups[1].startswith("mail-")
 
 
