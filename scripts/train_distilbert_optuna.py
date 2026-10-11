@@ -251,7 +251,8 @@ def _training_args(output_dir, learning_rate, num_epochs, evaluate, metric):
         metric_for_best_model=f"eval_{metric}_f1" if evaluate else None,
         greater_is_better=True,
         report_to="none",
-        dataloader_num_workers=4,
+        # On CPU each worker holds a copy of the data and the run runs out of memory.
+        dataloader_num_workers=4 if torch.cuda.is_available() else 0,
         dataloader_pin_memory=False,
     )
 
