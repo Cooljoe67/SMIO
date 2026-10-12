@@ -7,7 +7,7 @@ from email.utils import format_datetime
 import pytest
 
 from src import config
-from src.db.models import Email, MailEvent
+from src.db.models import Email, MailEvent, MailSyncState
 from src.mail import CursorExpired
 from src.mail import gmail as gmail_module
 from src.mail import sync as mail_sync
@@ -38,6 +38,7 @@ class FakeGmail:
         self.oldest_history = 0
         self.drafts = []
         self.calls = []
+        self.rate_limited = 0
 
     def add(self, message_id, *labels, days_old=0, subject="Lieferung", unread=True):
         date = NOW - timedelta(days=days_old)
@@ -94,6 +95,13 @@ class FakeGmail:
         path = url.removeprefix(API + "/")
         params = params or {}
         self.calls.append((method, path, params.get("format")))
+        if self.rate_limited:
+            self.rate_limited -= 1
+            return Response(403, {"error": {
+                "message": "Quota exceeded for quota metric 'Total Query Cost' and limit "
+                           "'Units per minute per user'",
+                "errors": [{"reason": "rateLimitExceeded"}],
+            }})
         if (method, path) == ("GET", "labels"):
             return Response(200, {"labels": [{"id": i, "name": n} for n, i in self.labels.items()]})
         if (method, path) == ("POST", "labels"):
@@ -305,3 +313,34 @@ def test_an_archived_mail_is_removed_by_the_next_complete_read(db, api, account,
     mail_sync.sync_existing_mails(account)
 
     assert db.query(Email).one().removal_reason == "external"
+
+
+def test_the_rate_limit_is_waited_out(account, api, monkeypatch):
+    waits = []
+    monkeypatch.setattr(gmail_module, "_sleep", waits.append)
+    api.add("a", "INBOX")
+    api.rate_limited = 2
+
+    assert [m.ref for m in _mailbox(account, api).read_folder("INBOX").messages] == ["a"]
+    assert waits == [1, 2]
+
+
+def test_a_large_first_import_is_spread_over_runs_and_stays_a_first_read(
+    db, api, account, synced, monkeypatch
+):
+    monkeypatch.setattr(mail_sync, "MAX_FETCHES", 2)
+    for message_id in ("a", "b", "c"):
+        api.add(message_id, "INBOX")
+
+    first = mail_sync.sync_account(account, allow_new=True)
+    assert (db.query(Email).count(), first["fetch_pending"]) == (2, ["INBOX"])
+    assert db.query(MailSyncState).filter(MailSyncState.folder == "INBOX").count() == 0
+    synced()
+    assert db.query(Email).count() == 3
+    api.deliver("d", "INBOX")
+    synced()
+
+    received = {
+        e.message_id: e.initial for e in db.query(MailEvent).filter(MailEvent.event_type == "received")
+    }
+    assert received == {"<a@test>": True, "<b@test>": True, "<c@test>": True, "<d@test>": False}

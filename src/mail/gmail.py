@@ -26,6 +26,7 @@ service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
 import base64
 import logging
 import os
+import time as clock
 from dataclasses import replace
 from datetime import datetime, time, timedelta, timezone
 from email import message_from_bytes
@@ -46,12 +47,30 @@ SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 # A complete read stores new mail of these last days only.
 IMPORT_DAYS = int(os.getenv("SMIO_GMAIL_IMPORT_DAYS", "30"))
 TIMEOUT_SECONDS = 30
+# Waits after Gmail's per-user rate limit (about 3000 reads a minute): 1, 2, ... 32 s.
+RATE_LIMIT_RETRIES = 6
+_sleep = clock.sleep
 
 
 class GmailApiError(RuntimeError):
     def __init__(self, status, message):
         super().__init__(f"Gmail API {status}: {message}")
         self.status = status
+
+
+def _rate_limited(response):
+    if response.status_code == 429:
+        return True
+    if response.status_code != 403:
+        return False
+    try:
+        error = response.json()["error"]
+    except Exception:
+        return False
+    reasons = {item.get("reason") for item in error.get("errors", [])}
+    return bool(reasons & {"rateLimitExceeded", "userRateLimitExceeded"}) or (
+        "per minute" in error.get("message", "")
+    )
 
 
 def _credential(value, secret_name):
@@ -108,9 +127,15 @@ class GmailMailbox(Mailbox):
         from google.auth.exceptions import RefreshError
 
         try:
-            response = self.session.request(
-                method, f"{API}/{path}", params=params, json=json, timeout=TIMEOUT_SECONDS
-            )
+            for attempt in range(RATE_LIMIT_RETRIES + 1):
+                response = self.session.request(
+                    method, f"{API}/{path}", params=params, json=json, timeout=TIMEOUT_SECONDS
+                )
+                if not _rate_limited(response) or attempt == RATE_LIMIT_RETRIES:
+                    break
+                wait = 2 ** attempt
+                logger.info("Gmail rate limit for account %s; retrying in %d s", self.account.id, wait)
+                _sleep(wait)
         except RefreshError as error:
             gmail = self.account.gmail
             if self._reconnect and not retried:

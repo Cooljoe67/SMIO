@@ -29,6 +29,10 @@ SENT_SYNC_DAYS = int(os.getenv("SMIO_SENT_SYNC_DAYS", "30"))
 # complete read notices mails that left (deleted, or moved to an unwatched
 # folder) and mails marked read.
 FULL_SYNC_MINUTES = int(os.getenv("SMIO_FULL_SYNC_MINUTES", "60"))
+# Providers that list stubs (Gmail) fetch the content of at most this many new
+# mails per account and run, so a large first import stays within their rate
+# limits; the rest follows in the next runs.
+MAX_FETCHES = int(os.getenv("SMIO_SYNC_MAX_FETCHES", "500"))
 
 
 def _utcnow():
@@ -89,13 +93,14 @@ def _find_email(db, account, message_id, mail_fingerprint, subject, date, provid
 
 def observe(
     db, account, msg, folder_name, allow_new, seen_ids=(), new_emails=None, outbound=False,
-    initial=False,
+    initial=False, fetches=None,
 ):
     """Store a message read from folder_name and record what changed; initial
     for the folder's first read, whose events trigger no actions.
 
-    Returns the stored mail, or None for a copy already seen in this sync or a
-    new mail that may not be stored here (allow_new).
+    Returns the stored mail, or None for a copy already seen in this sync, a
+    new mail that may not be stored here (allow_new), or a stub beyond the
+    run's fetches ({"left": n, "truncated": folders}).
     """
     email_obj = None
     if not msg.loaded:
@@ -104,6 +109,11 @@ def observe(
         if email_obj is None:
             if not (allow_new and msg.importable):
                 return None
+            if fetches is not None:
+                if fetches["left"] <= 0:
+                    fetches["truncated"].add(folder_name)
+                    return None
+                fetches["left"] -= 1
             msg = msg.load()
             if msg is None:
                 return None
@@ -246,6 +256,7 @@ def sync_account(account, allow_new, full=False):
             seen_ids = set()
             complete_folders = set()
             initial_folders = set()
+            fetches = {"left": MAX_FETCHES, "truncated": set()}
 
             def sync_folder(read, allow_new_here, outbound=False):
                 nonlocal checked, changed
@@ -259,7 +270,7 @@ def sync_account(account, allow_new, full=False):
                     email_obj = observe(
                         db, account, msg, folder_state.folder, allow_new=allow_new_here,
                         seen_ids=seen_ids, new_emails=new_emails, outbound=outbound,
-                        initial=initial,
+                        initial=initial, fetches=fetches,
                     )
                     if email_obj is None:
                         continue
@@ -269,7 +280,14 @@ def sync_account(account, allow_new, full=False):
                     new_count = len(new_emails)
                 if folder_state.complete:
                     complete_folders.add(folder_state.folder)
-                _save_cursor(db, account, states, folder_state, read_in_full, sync_started)
+                if folder_state.folder not in fetches["truncated"]:
+                    _save_cursor(db, account, states, folder_state, read_in_full, sync_started)
+                elif not initial:
+                    # Read it completely again next run to fetch the rest.
+                    _save_cursor(db, account, states, folder_state, False, sync_started)
+                    states[folder_state.folder].full_sync_at = None
+                # A truncated first read gets no state: it stays a first read, whose
+                # mail triggers no actions, until all of it is fetched.
 
             for folder_name in _folder_names(mailbox, account):
                 sync_folder(
@@ -310,10 +328,16 @@ def sync_account(account, allow_new, full=False):
             db.commit()
             cleanup = cleanup_expired_mails(db, mailbox, account)
             db.commit()
+            if fetches["truncated"]:
+                logger.info(
+                    "Account %s: %d new mails fetched; the rest of %s follows next run",
+                    account.id, MAX_FETCHES, sorted(fetches["truncated"]),
+                )
             return {
                 "checked": checked,
                 "changed": changed,
                 "complete_folders": sorted(complete_folders),
+                "fetch_pending": sorted(fetches["truncated"]),
                 "sent": sent_result,
                 "cleanup": cleanup,
                 "new": new_emails,
