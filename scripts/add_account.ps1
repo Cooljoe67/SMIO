@@ -178,6 +178,17 @@ function Get-GcloudSecretValue {
     return ($value -join "`n")
 }
 
+function Get-GmailAddressKey {
+    # Gmail ignores case and dots in the name, and googlemail.com is gmail.com.
+    param([string]$Address)
+
+    $name, $domain = $Address.Trim().ToLowerInvariant() -split '@', 2
+    if ($domain -in @("gmail.com", "googlemail.com")) {
+        return $name.Replace('.', '') + "@gmail.com"
+    }
+    return "$name@$domain"
+}
+
 function ConvertTo-Base64Url {
     param([byte[]]$Bytes)
 
@@ -346,7 +357,8 @@ else {
     $token = Get-GmailToken $ClientId $clientSecret $Email
     $gmailProfile = Invoke-RestMethod -Uri "https://gmail.googleapis.com/gmail/v1/users/me/profile" `
         -Headers @{ Authorization = "Bearer $($token.access_token)" }
-    if (-not [string]::IsNullOrWhiteSpace($Email) -and $gmailProfile.emailAddress -ne $Email) {
+    if (-not [string]::IsNullOrWhiteSpace($Email) -and
+        (Get-GmailAddressKey $gmailProfile.emailAddress) -ne (Get-GmailAddressKey $Email)) {
         throw "Logged in as $($gmailProfile.emailAddress), not $Email; run again and choose that account."
     }
     $Email = $gmailProfile.emailAddress
