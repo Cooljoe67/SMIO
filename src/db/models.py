@@ -155,6 +155,8 @@ class MailEvent(Base):
     # "user": found on the server; "system": done by SMIO.
     source = Column(String, nullable=False)
     occurred_at = Column(DateTime, default=_utcnow, nullable=False)
+    # From a folder's first read, or SMIO sorting mail of one: recorded, no actions.
+    initial = Column(Boolean, default=False, nullable=False)
     # Set once every action that applies has run or given up.
     dispatched_at = Column(DateTime, nullable=True, index=True)
 
@@ -168,6 +170,8 @@ class MailEventAction(Base):
 
     id = Column(Integer, primary_key=True)
     event_id = Column(Integer, nullable=False, index=True)
+    # An action runs at most once per mail, whichever of its events triggers it.
+    email_id = Column(Integer, nullable=False, index=True)
     action = Column(String, nullable=False)
     # running (claimed; stays so if the process died during the action), done, failed.
     status = Column(String, nullable=False)

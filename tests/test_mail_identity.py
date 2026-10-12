@@ -46,6 +46,7 @@ class FakeServer:
         self.moves = []
         self.criteria = {}
         self.validity = {}
+        self.appended = []
         self.folder = SimpleNamespace(
             status=lambda name, options: {
                 "UIDVALIDITY": self.validity.get(name, 1), "UIDNEXT": self.next_uid + 1
@@ -80,6 +81,9 @@ class FakeServer:
             if (uid_list is None or m.uid in uid_list)
             and (uid_range is None or int(m.uid) >= int(uid_range.group(1)))
         ])
+
+    def append(self, raw, folder="INBOX", dt=None, flag_set=None):
+        self.appended.append((raw, folder, list(flag_set or ())))
 
     def deliver(self, folder, message):
         """A mail arriving: it gets the next UID, like on a real server."""

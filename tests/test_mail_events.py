@@ -139,14 +139,14 @@ def _stored_event(db, event_type="moved"):
 
 def test_an_action_runs_once_per_event(db, actions):
     runs = []
-    events.action("note", applies=lambda e: e.event_type == "moved")(
+    events.action("note", applies=lambda db, e: e.event_type == "moved")(
         lambda db, e: runs.append(e.event_key)
     )
     event = _stored_event(db)
     _stored_event(db, "read")
 
-    assert events.dispatch(db) == {"events": 2, "done": 1, "failed": 0}
-    assert events.dispatch(db) == {"events": 0, "done": 0, "failed": 0}
+    assert events.dispatch(db) == {"events": 2, "done": 1, "skipped": 0, "failed": 0}
+    assert events.dispatch(db)["events"] == 0
     assert runs == [event.event_key]
 
 
@@ -154,7 +154,7 @@ def test_a_failing_action_is_retried_until_it_gives_up(db, actions):
     def fail(db, event):
         raise RuntimeError("ntfy down")
 
-    events.action("notify", applies=lambda e: True)(fail)
+    events.action("notify", applies=lambda db, e: True)(fail)
     event = _stored_event(db)
 
     for _ in range(events.MAX_ATTEMPTS):
@@ -167,10 +167,12 @@ def test_a_failing_action_is_retried_until_it_gives_up(db, actions):
 
 def test_an_interrupted_action_is_never_started_again(db, actions):
     runs = []
-    events.action("draft", applies=lambda e: True)(lambda db, e: runs.append(e.id))
+    events.action("draft", applies=lambda db, e: True)(lambda db, e: runs.append(e.id))
     event = _stored_event(db)
     # The process died after claiming the run.
-    db.add(MailEventAction(event_id=event.id, action="draft", status="running", attempts=1))
+    db.add(MailEventAction(
+        event_id=event.id, email_id=event.email_id, action="draft", status="running", attempts=1
+    ))
     db.commit()
 
     events.dispatch(db)

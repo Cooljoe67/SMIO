@@ -97,3 +97,24 @@ accounts:
   #     tenant_id: ${EXCHANGE_TENANT_ID}
   #     client_id: ${EXCHANGE_CLIENT_ID}
   #     client_secret_secret: exchange-example-client-secret
+
+# Actions on mail events (src/mail/rules.py), checked when the config loads.
+# A rule runs its steps when any `when` entry matches; all conditions within
+# an entry must hold. Each step runs at most once per mail, and never for mail
+# found by an account's first sync. Conditions:
+#   event: received | sent | moved | removed | read
+#   source: user (found on the server, whoever did it) | system (done by SMIO,
+#           e.g. sorted by the model); omitted: either
+#   to: a folder of the account's folder list (moved events only)
+#   from: sender address, or "@domain"; subject_contains, body_contains
+#         (case-insensitive)
+# Steps: create_draft (reply written by Claude Haiku into the drafts folder,
+# optional instructions:). Planned: forward, ntfy.
+# Example for an account on the logistics list:
+# actions:
+#   draft:
+#     accounts: [gmail-example]
+#     when:
+#       - {event: moved, to: zu_beantworten}
+#     do:
+#       - create_draft: {instructions: "Siezen. Unterschrift: Marcus Beispiel, Disposition"}

@@ -18,10 +18,14 @@ source: "user" for changes found on the server, whoever made them (the owner,
 a mail client, a server rule); "system" for SMIO's own commands.
 
 A user's move teaches the classifier at once (_learn_from_move). Other
-reactions are actions: functions registered with @action and run by
-dispatch() after the change is committed. Each action runs at most once per
-event; one that raises is retried up to MAX_ATTEMPTS times, so it must raise
-only if its effect did not happen.
+reactions are actions: registered with @action, or configured as rules in
+config/smio.yaml (src/mail/rules.py), and run by dispatch() after the change
+is committed. Each action runs at most once per mail, whichever of its events
+triggers it; one that raises is retried up to MAX_ATTEMPTS times, so it must
+raise only if its effect did not happen.
+
+Events of a folder's first read (an account's existing mail) are initial:
+recorded, but no action runs for them, nor for SMIO sorting such mail.
 """
 
 import logging
@@ -32,6 +36,7 @@ from sqlalchemy.exc import IntegrityError
 
 from src.api.utils.folder_rules import classification_for_folder, inbox_folder
 from src.db.models import MailEvent, MailEventAction
+from src.mail import rules
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +44,7 @@ EVENT_TYPES = ("received", "sent", "moved", "removed", "read")
 SOURCES = ("user", "system")
 MAX_ATTEMPTS = 3
 
-# name -> (applies(event) -> bool, run(db, event))
+# name -> (applies(db, event) -> bool, run(db, event))
 _ACTIONS = {}
 
 
@@ -63,12 +68,27 @@ def as_dict(event):
     }
 
 
-def record(db, account, email, event_type, from_folder=None, to_folder=None, source="user"):
+def record(
+    db, account, email, event_type, from_folder=None, to_folder=None, source="user", initial=False
+):
     """Record a change of email that the caller is committing; email needs an id."""
     if event_type not in EVENT_TYPES:
         raise ValueError(f"Unknown event type: {event_type!r}")
     if source not in SOURCES:
         raise ValueError(f"Unknown event source: {source!r}")
+    if source == "system" and not initial:
+        # Sorting the existing mail of a first read must not draft or forward either.
+        initial = (
+            db.query(MailEvent.id)
+            .filter(
+                MailEvent.email_id == email.id,
+                MailEvent.event_type.in_(("received", "sent")),
+                MailEvent.initial.is_(True),
+            )
+            .first()
+            is not None
+        )
+    occurred_at = _utcnow()
     seq = (
         db.query(func.max(MailEvent.seq)).filter(MailEvent.email_id == email.id).scalar() or 0
     ) + 1
@@ -83,7 +103,9 @@ def record(db, account, email, event_type, from_folder=None, to_folder=None, sou
         from_folder=from_folder,
         to_folder=to_folder,
         source=source,
-        occurred_at=_utcnow(),
+        occurred_at=occurred_at,
+        initial=initial,
+        dispatched_at=occurred_at if initial else None,
     )
     db.add(event)
     # Visible to the next record() for this mail (autoflush is off).
@@ -135,7 +157,7 @@ def _learn_from_move(account, email, from_folder, to_folder, now):
 
 
 def action(name, applies):
-    """Register run(db, event) for the events applies(event) accepts."""
+    """Register run(db, event) for the events applies(db, event) accepts."""
     def register(run):
         _ACTIONS[name] = (applies, run)
         return run
@@ -143,12 +165,24 @@ def action(name, applies):
 
 
 def _run_once(db, event, name, run):
-    """Run an action for an event unless it ran, runs, or failed for good; returns its status."""
+    """Run an action for an event unless it ran, runs, or failed for good, or
+    ran for an earlier event of the same mail; returns its status."""
     run_row = (
         db.query(MailEventAction)
         .filter(MailEventAction.event_id == event.id, MailEventAction.action == name)
         .first()
     )
+    if run_row is None and (
+        db.query(MailEventAction.id)
+        .filter(
+            MailEventAction.email_id == event.email_id,
+            MailEventAction.action == name,
+            MailEventAction.status.in_(("done", "running")),
+        )
+        .first()
+        is not None
+    ):
+        return "skipped"
     if run_row is not None and (
         run_row.status in ("done", "running") or run_row.attempts >= MAX_ATTEMPTS
     ):
@@ -158,7 +192,9 @@ def _run_once(db, event, name, run):
             )
         return run_row.status
     if run_row is None:
-        run_row = MailEventAction(event_id=event.id, action=name, attempts=0)
+        run_row = MailEventAction(
+            event_id=event.id, email_id=event.email_id, action=name, attempts=0
+        )
         db.add(run_row)
     run_row.status = "running"
     run_row.attempts += 1
@@ -190,16 +226,18 @@ def dispatch(db, account=None):
     query = db.query(MailEvent).filter(MailEvent.dispatched_at.is_(None))
     if account is not None:
         query = query.filter(MailEvent.account == account.id)
-    counts = {"events": 0, "done": 0, "failed": 0}
+    # Rules are read from the config on every call, so edits apply on the next run.
+    actions = {**_ACTIONS, **rules.configured_actions()}
+    counts = {"events": 0, "done": 0, "skipped": 0, "failed": 0}
     for event in query.order_by(MailEvent.id).all():
         counts["events"] += 1
         settled = True
-        for name, (applies, run) in list(_ACTIONS.items()):
-            if not applies(event):
+        for name, (applies, run) in actions.items():
+            if not applies(db, event):
                 continue
             status = _run_once(db, event, name, run)
-            if status == "done":
-                counts["done"] += 1
+            if status in ("done", "skipped"):
+                counts[status] += 1
             elif status == "failed":
                 counts["failed"] += 1
                 attempts = (

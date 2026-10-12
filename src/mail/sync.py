@@ -81,9 +81,11 @@ def _find_email(db, account, message_id, mail_fingerprint, subject, date, provid
 
 
 def observe(
-    db, account, msg, folder_name, allow_new, seen_ids=(), new_emails=None, outbound=False
+    db, account, msg, folder_name, allow_new, seen_ids=(), new_emails=None, outbound=False,
+    initial=False,
 ):
-    """Store a message read from folder_name and record what changed.
+    """Store a message read from folder_name and record what changed; initial
+    for the folder's first read, whose events trigger no actions.
 
     Returns the stored mail, or None for a copy already seen in this sync or a
     new mail that may not be stored here (allow_new).
@@ -150,11 +152,17 @@ def observe(
         if new_emails is not None:
             new_emails.append(email_obj)
     if received:
-        record(db, account, email_obj, "sent" if outbound else "received", to_folder=folder_name)
+        record(
+            db, account, email_obj, "sent" if outbound else "received",
+            to_folder=folder_name, initial=initial,
+        )
     elif previous_folder != folder_name:
-        record(db, account, email_obj, "moved", from_folder=previous_folder, to_folder=folder_name)
+        record(
+            db, account, email_obj, "moved",
+            from_folder=previous_folder, to_folder=folder_name, initial=initial,
+        )
     if first_read:
-        record(db, account, email_obj, "read", to_folder=folder_name)
+        record(db, account, email_obj, "read", to_folder=folder_name, initial=initial)
     return email_obj
 
 
@@ -217,16 +225,21 @@ def sync_account(account, allow_new, full=False):
             new_emails = []
             seen_ids = set()
             complete_folders = set()
+            initial_folders = set()
 
             def sync_folder(read, allow_new_here, outbound=False):
                 nonlocal checked, changed
                 folder_state, read_in_full = read
+                initial = folder_state.folder not in states
+                if initial:
+                    initial_folders.add(folder_state.folder)
                 new_count = len(new_emails)
                 for msg in folder_state.messages:
                     checked += 0 if outbound else 1
                     email_obj = observe(
                         db, account, msg, folder_state.folder, allow_new=allow_new_here,
                         seen_ids=seen_ids, new_emails=new_emails, outbound=outbound,
+                        initial=initial,
                     )
                     if email_obj is None:
                         continue
@@ -270,7 +283,10 @@ def sync_account(account, allow_new, full=False):
             for email in stale_emails:
                 email.removed_at = sync_started
                 email.removal_reason = "external"
-                record(db, account, email, "removed", from_folder=email.folder)
+                record(
+                    db, account, email, "removed",
+                    from_folder=email.folder, initial=email.folder in initial_folders,
+                )
             db.commit()
             cleanup = cleanup_expired_mails(db, mailbox, account)
             db.commit()

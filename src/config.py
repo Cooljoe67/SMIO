@@ -16,7 +16,7 @@ from typing import Literal, Optional
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -131,9 +131,81 @@ class Account(_Strict):
         return self
 
 
+class RuleTrigger(_Strict):
+    """An event a rule reacts to; every condition given must hold."""
+
+    event: Literal["received", "sent", "moved", "removed", "read"]
+    # "user": found on the server, whoever did it; "system": done by SMIO,
+    # e.g. sorted by the model. None: either.
+    source: Optional[Literal["user", "system"]] = None
+    # Label (key of the account's folder list) the mail was moved to.
+    to: Optional[str] = None
+    # Sender address, or "@domain" for a whole domain.
+    sender: Optional[str] = Field(None, alias="from")
+    # Case-insensitive.
+    subject_contains: Optional[str] = None
+    body_contains: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _to_only_for_moves(self):
+        if self.to is not None and self.event != "moved":
+            raise ValueError("'to' only applies to moved events")
+        return self
+
+
+class CreateDraft(_Strict):
+    """A reply draft written by Claude Haiku (src/ai/reply_draft.py)."""
+
+    # Added to the model's instructions, e.g. tone, facts to mention, signature.
+    instructions: Optional[str] = None
+
+
+class RuleStep(_Strict):
+    """One thing a rule does: exactly one of the keys below. Planned: forward, ntfy."""
+
+    create_draft: Optional[CreateDraft] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _shorthand(cls, data):
+        # "- create_draft" and "- create_draft:" mean "- create_draft: {}".
+        if isinstance(data, str):
+            return {data: {}}
+        if isinstance(data, dict):
+            return {key: {} if value is None else value for key, value in data.items()}
+        return data
+
+    @model_validator(mode="after")
+    def _exactly_one(self):
+        if len(self.model_fields_set) != 1:
+            raise ValueError("a step needs exactly one action, e.g. 'create_draft: {}'")
+        return self
+
+    @property
+    def kind(self):
+        return next(iter(self.model_fields_set))
+
+
+class ActionRule(_Strict):
+    """Runs its steps for an event that matches any of its `when` entries."""
+
+    # Ids of the accounts the rule applies to; None: every account.
+    accounts: Optional[list[str]] = None
+    when: list[RuleTrigger] = Field(min_length=1)
+    do: list[RuleStep] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _one_step_per_kind(self):
+        kinds = [step.kind for step in self.do]
+        if len(kinds) != len(set(kinds)):
+            raise ValueError("each action may appear only once per rule")
+        return self
+
+
 class SmioConfig(_Strict):
     folder_lists: dict[str, dict[str, FolderRule]]
     accounts: list[Account]
+    actions: dict[str, ActionRule] = {}
 
     @model_validator(mode="after")
     def _check_references(self):
@@ -156,6 +228,18 @@ class SmioConfig(_Strict):
                 raise ValueError(
                     f"account {account.id!r} uses unknown folder list {account.folder_list!r}"
                 )
+        for name, rule in self.actions.items():
+            unknown = set(rule.accounts or ()) - set(ids)
+            if unknown:
+                raise ValueError(f"action {name!r} names unknown account(s) {sorted(unknown)}")
+            targets = [a for a in self.accounts if rule.accounts is None or a.id in rule.accounts]
+            for trigger in rule.when:
+                for account in targets:
+                    if trigger.to is not None and trigger.to not in self.folder_lists[account.folder_list]:
+                        raise ValueError(
+                            f"action {name!r}: folder list {account.folder_list!r} of account "
+                            f"{account.id!r} has no folder {trigger.to!r}"
+                        )
         return self
 
     def labels(self, folder_list):
