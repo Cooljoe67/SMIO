@@ -155,7 +155,7 @@ def label_ids(folder_list):
     """Label -> id. The default list keeps the ids the retraining code expects."""
     if folder_list == DEFAULT_FOLDER_LIST:
         return dict(DEFAULT_LABEL2ID)
-    labels = sorted(get_config().folder_lists[folder_list]) + ["other"]
+    labels = sorted(get_config().labels(folder_list) - {"other"}) + ["other"]
     return {label: index for index, label in enumerate(labels)}
 
 

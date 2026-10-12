@@ -37,14 +37,16 @@ folder_lists:
 
   # Logistics folders by what a mail needs; scripts/import_labelled_tsv.py
   # derives them from the labelled dataset (t1a-arbeitsblatt.tsv). Mails needing
-  # other action stay in the inbox ("other"). "5: Antwort ausstehend" and
-  # "6: Abgeschlossen" are filed by hand only and not part of the model yet.
+  # other action stay in the inbox ("other"). "manual: true" folders are filed
+  # by hand only: watched for moves, never predicted, not model labels.
   # Business mail is kept; only read newsletters are deleted after 10 days.
   logistics:
     dringend: {folder: "1: Dringend"}
     zu_beantworten: {folder: "2: Zu beantworten"}
     zur_kenntnis: {folder: "3: Zur Kenntnis"}
     statusmeldung: {folder: "4: Statusmeldung"}
+    antwort_ausstehend: {folder: "5: Antwort ausstehend", manual: true}
+    abgeschlossen: {folder: "6: Abgeschlossen", manual: true}
     marketing: {folder: "7: Marketing & Newsletter", retention_days: 10}
     transportdokumente: {folder: "8: Transportdokumente"}
     rechnungen: {folder: "9: Rechnungen & Belege"}

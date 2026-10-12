@@ -21,7 +21,9 @@ def import_training_data():
 
     with open_mailbox(account) as mailbox:
         existing = set(mailbox.folders())
-        for label in folder_rules(account):
+        for label, rule in folder_rules(account).items():
+            if rule.manual:
+                continue
             folder = folder_path(label, account)
             if folder not in existing:
                 print(f"Folder not found: {folder}")

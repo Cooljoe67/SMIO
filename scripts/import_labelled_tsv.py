@@ -57,7 +57,7 @@ def _boolean(row, column):
 
 def folder_labels(folder_list):
     """Labels of the folder list, including the implicit "other"."""
-    return set(get_config().folder_lists[folder_list]) | {"other"}
+    return get_config().labels(folder_list)
 
 
 def dataset_label(row, prefix=""):

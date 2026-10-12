@@ -43,6 +43,10 @@ class FolderRule(_Strict):
     enabled: bool = True
     retention_days: Optional[int] = None
     retention_days_unread: Optional[int] = None
+    # Filed by hand only: watched for moves (events) and retention, but never
+    # predicted and not a label of the model, so moving a mail there or out of
+    # it teaches the classifier nothing.
+    manual: bool = False
 
 
 class MailboxLayout(_Strict):
@@ -140,6 +144,8 @@ class SmioConfig(_Strict):
                 raise ValueError(
                     f"folder list {list_name!r}: 'other' is implicit and stays in the inbox"
                 )
+            if all(rule.manual for rule in rules.values()):
+                raise ValueError(f"folder list {list_name!r} has no folders the model predicts")
         if not self.accounts:
             raise ValueError("at least one account is required")
         ids = [account.id for account in self.accounts]
@@ -151,6 +157,11 @@ class SmioConfig(_Strict):
                     f"account {account.id!r} uses unknown folder list {account.folder_list!r}"
                 )
         return self
+
+    def labels(self, folder_list):
+        """The model's labels for a folder list: its predicted folders and "other"."""
+        rules = self.folder_lists[folder_list]
+        return {label for label, rule in rules.items() if not rule.manual} | {"other"}
 
     def account(self, account_id):
         for account in self.accounts:

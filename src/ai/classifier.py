@@ -63,7 +63,7 @@ def _labels(folder_list, model):
             raise ValueError(f"Model for folder list {folder_list!r} has no label names")
         id2label = ID2LABEL
 
-    expected = set(get_config().folder_lists[folder_list]) | {"other"}
+    expected = get_config().labels(folder_list)
     if set(id2label.values()) != expected:
         raise ValueError(
             f"Model for folder list {folder_list!r} predicts {sorted(id2label.values())}, "

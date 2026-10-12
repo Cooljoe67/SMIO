@@ -24,7 +24,8 @@ def folder_rules(account=None):
 
 
 def classification_folders(account=None):
-    return set(folder_rules(account))
+    """Labels the model predicts, without "other" and manual folders."""
+    return {label for label, rule in folder_rules(account).items() if not rule.manual}
 
 
 def folder_path(classification, account=None):
@@ -41,14 +42,15 @@ def folder_path(classification, account=None):
 def folder_for_classification(classification, account=None):
     """Folder to sort a mail into, or None if it stays in the inbox."""
     rule = folder_rules(account).get(classification)
-    if rule is None or not rule.enabled:
+    if rule is None or not rule.enabled or rule.manual:
         return None
     return folder_path(classification, account)
 
 
 def classification_for_folder(folder, account=None):
-    """Label of an IMAP folder, regardless of whether sorting into it is enabled."""
-    for classification in folder_rules(account):
+    """Label of a folder, whether or not sorting into it is enabled; None for
+    the inbox, manual folders and folders outside the list."""
+    for classification in classification_folders(account):
         if folder_path(classification, account) == folder:
             return classification
     return None
