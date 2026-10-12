@@ -63,6 +63,7 @@ accounts:
       folder_root: INBOX      # classification folders become <folder_root>/<folder>
       trash: Papierkorb
       # sent: Gesendet        # default: the folder the server flags as \Sent
+      # drafts: Entwürfe      # reply drafts; default: the folder the server flags as \Drafts
     imap:
       host: ${IMAP_HOST}
       username: ${IMAP_USER}

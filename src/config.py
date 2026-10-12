@@ -51,6 +51,8 @@ class MailboxLayout(_Strict):
     trash: str = "Papierkorb"
     # Read-only, for recognising replies; None: the folder flagged \Sent.
     sent: Optional[str] = None
+    # Where SMIO stores reply drafts; None: the folder flagged \Drafts.
+    drafts: Optional[str] = None
 
 
 def _one_source(connection, field):
