@@ -93,7 +93,7 @@ def test_broken_reload_keeps_previous_config(use_config, monkeypatch, tmp_path):
 
 
 def test_scripts_can_load_the_config_without_the_imap_password(monkeypatch):
-    from src.api.utils import imap_client
+    from src.mail import imap as mail_imap
 
     monkeypatch.delenv("IMAP_PASSWORD")
     text = config.CONFIG_PATH.read_text(encoding="utf-8")
@@ -105,7 +105,7 @@ def test_scripts_can_load_the_config_without_the_imap_password(monkeypatch):
         text.replace("password_secret: imap-password", "password: ${IMAP_PASSWORD}")
     )
     with pytest.raises(RuntimeError, match="unavailable: environment variable.*IMAP_PASSWORD"):
-        imap_client.open_mailbox(local.accounts[0])
+        mail_imap.connect(local.accounts[0])
 
 
 def test_repository_config_is_valid():

@@ -43,6 +43,14 @@ class FolderState:
     # missing has left it. False: only some messages (a date window or a
     # provider's change feed); a missing mail says nothing.
     complete: bool
+    # Where the next read_changes continues; stored per account and folder.
+    cursor: Optional[str] = None
+
+
+class CursorExpired(Exception):
+    """The provider can no longer read changes from this cursor (IMAP: the
+    folder was renumbered; Gmail: the historyId is too old). Read the folder
+    in full instead."""
 
 
 class Mailbox(ABC):
@@ -76,6 +84,16 @@ class Mailbox(ABC):
     @abstractmethod
     def read_folder(self, folder, since: Optional[date] = None):
         """Messages in a folder as a FolderState; complete unless since is given."""
+
+    @abstractmethod
+    def read_changes(self, folder, cursor):
+        """Messages that arrived in a folder after cursor, as an incomplete
+        FolderState. Raises CursorExpired if the cursor is no longer valid.
+
+        A move shows up as an arrival in the destination only; leaving a folder
+        is seen by the next complete read. Providers with one change feed per
+        account (Gmail history) may return the same cursor for every folder.
+        """
 
     @abstractmethod
     def get(self, folder, ref, headers_only=True):

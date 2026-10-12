@@ -8,15 +8,15 @@ from sqlalchemy.orm import sessionmaker
 from scripts import import_training_data
 from src.db import database
 from src.db.models import Base, Email
+from src.mail import FolderState
+from src.mail.imap import to_mail_message
 
 
 class FakeMailBox:
     """Folders of the primary account with the messages they contain."""
 
     def __init__(self, folders):
-        self.folders = folders
-        self.current = None
-        self.folder = SimpleNamespace(set=self._set)
+        self.contents = folders
 
     def __enter__(self):
         return self
@@ -24,17 +24,17 @@ class FakeMailBox:
     def __exit__(self, *exc):
         return False
 
-    def _set(self, folder):
-        if folder not in self.folders:
-            raise LookupError(folder)
-        self.current = folder
+    def folders(self):
+        return list(self.contents)
 
-    def fetch(self):
-        return self.folders[self.current]
+    def read_folder(self, folder, since=None):
+        messages = [to_mail_message(msg, folder) for msg in self.contents[folder]]
+        return FolderState(folder=folder, messages=messages, complete=True)
 
 
 def _message(message_id, subject):
     return SimpleNamespace(
+        uid="1",
         subject=subject,
         from_="sender@test",
         date=datetime(2026, 10, 1),

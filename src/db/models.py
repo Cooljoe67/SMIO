@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import declarative_base
 from datetime import datetime, timezone
 
@@ -114,6 +114,22 @@ class Email(Base):
     # Permanently reserved for evaluation; never used for training.
     is_eval_holdout = Column(Boolean, default=False, nullable=False)
     is_training_data = Column(Boolean, default=False, nullable=False)
+
+
+class MailSyncState(Base):
+    """Where the last sync of an account's folder stopped (src/mail/base.py)."""
+
+    __tablename__ = "mail_sync_state"
+    __table_args__ = (UniqueConstraint("account", "folder"),)
+
+    id = Column(Integer, primary_key=True)
+    account = Column(String, nullable=False, index=True)
+    folder = Column(String, nullable=False)
+    # Opaque to everything but the account's adapter (IMAP: UIDVALIDITY:UIDNEXT).
+    cursor = Column(String, nullable=True)
+    # Last complete read: only that can tell that a mail has left the folder.
+    full_sync_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=_utcnow, nullable=False)
 
 
 class SummarySnapshot(Base):

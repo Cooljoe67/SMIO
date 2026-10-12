@@ -12,8 +12,8 @@ from src.api.utils.folder_rules import classification_folders, inbox_folder
 from src.api.utils.imap_client import (
     move_email_to_classification_folder,
     move_email_to_inbox,
-    open_mailbox,
 )
+from src.mail import open_mailbox
 
 
 logger = logging.getLogger(__name__)

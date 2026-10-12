@@ -8,6 +8,7 @@ from src.ai import reply_status
 from src.api.utils import inbox_processor, reply_tracking
 from src.config import primary_account
 from src.db.models import Email
+from src.mail.imap import ImapMailbox
 from tests.test_mail_identity import SENT, _message, _sync, server  # noqa: F401
 
 OWNER = primary_account().email
@@ -105,7 +106,9 @@ def test_sent_folder_is_detected_and_its_mails_stored_as_outbound(db, server, mo
     assert reply.in_reply_to == "<orig@test>"
     assert "SINCE" in mailbox.criteria["Gesendet"]
     # Sent mails are never classified or moved.
-    monkeypatch.setattr(inbox_processor, "open_mailbox", lambda account: mailbox)
+    monkeypatch.setattr(
+        inbox_processor, "open_mailbox", lambda account: ImapMailbox(account, connection=mailbox)
+    )
     _, results, _ = inbox_processor.process_unprocessed_emails(db, primary_account())
     assert [r["email_id"] for r in results] == [db.query(Email).filter(Email.message_id == "<orig@test>").one().id]
 
@@ -128,7 +131,9 @@ def test_inbox_copy_arriving_after_the_sent_copy_is_processed(db, server, monkey
 
     email = db.query(Email).one()
     assert (email.folder, email.direction, email.processed, email.processing_batch) == ("INBOX", None, 0, None)
-    monkeypatch.setattr(inbox_processor, "open_mailbox", lambda account: mailbox)
+    monkeypatch.setattr(
+        inbox_processor, "open_mailbox", lambda account: ImapMailbox(account, connection=mailbox)
+    )
     _, results, _ = inbox_processor.process_unprocessed_emails(db, primary_account())
     assert [r["email_id"] for r in results] == [email.id]
 

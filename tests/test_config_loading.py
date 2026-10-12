@@ -177,7 +177,7 @@ def test_unavailable_account_is_refused_before_connecting(monkeypatch):
     monkeypatch.setattr(mail_imap, "MailBox", lambda host: pytest.fail("connected"))
 
     with pytest.raises(RuntimeError, match="'second' is unavailable: environment variable"):
-        imap_client.open_mailbox(account)
+        mail_imap.connect(account)
 
 
 def test_five_minute_workflow_reports_the_unavailable_account(monkeypatch):
@@ -189,7 +189,7 @@ def test_five_minute_workflow_reports_the_unavailable_account(monkeypatch):
     )
 
     def fetch_inbox(account):
-        imap_client.open_mailbox(account)
+        mail_imap.connect(account)
         return []
 
     monkeypatch.setattr(workflows, "fetch_inbox", fetch_inbox)

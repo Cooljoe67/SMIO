@@ -26,6 +26,7 @@ class Connection:
             ],
             set=self._select,
             exists=lambda name: name in self.folders,
+            status=lambda name, options: {"UIDVALIDITY": 3, "UIDNEXT": 9},
             create=lambda name: self.folders.setdefault(name, []),
         )
 

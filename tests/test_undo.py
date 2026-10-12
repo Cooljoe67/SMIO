@@ -45,6 +45,9 @@ class FakeMailBox:
     def __exit__(self, *exc):
         return False
 
+    def logout(self):
+        pass
+
     def move(self, uids, destination):
         self.moves.append((self.current, list(uids), destination))
 

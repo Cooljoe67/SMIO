@@ -94,6 +94,7 @@ class FakeMailBox:
         self.messages = messages
         self.folder = SimpleNamespace(
             exists=lambda name: True,
+            status=lambda name, options: {"UIDVALIDITY": 1, "UIDNEXT": 1},
             create=lambda name: None,
             set=lambda name, readonly=False: None,
         )

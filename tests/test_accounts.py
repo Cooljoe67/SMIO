@@ -9,6 +9,7 @@ from src import config
 from src.api.utils import command_processor, imap_client, inbox_processor
 from src.db import database
 from src.db.models import Base, Email
+from src.mail.imap import ImapMailbox, to_mail_message
 from src.scheduler import workflows
 
 TWO_ACCOUNTS = """
@@ -61,13 +62,16 @@ class FakeMailBox:
     def uids(self, criteria):
         return ["900"]
 
+    def logout(self):
+        pass
+
 
 @pytest.fixture
 def mailboxes(monkeypatch):
     opened = {}
 
     def open_mailbox(account):
-        return opened.setdefault(account.id, FakeMailBox())
+        return ImapMailbox(account, connection=opened.setdefault(account.id, FakeMailBox()))
 
     for module in (imap_client, inbox_processor):
         monkeypatch.setattr(module, "open_mailbox", open_mailbox)
@@ -77,7 +81,7 @@ def mailboxes(monkeypatch):
 
 
 def _message(uid, message_id):
-    return SimpleNamespace(
+    return to_mail_message(SimpleNamespace(
         uid=uid,
         headers={"Message-ID": message_id},
         flags=(),
@@ -86,7 +90,7 @@ def _message(uid, message_id):
         date=datetime(2026, 10, 8),
         text="body",
         html="",
-    )
+    ), "INBOX")
 
 
 def _email(db, account, batch, folder, **fields):
@@ -164,7 +168,7 @@ def test_processing_uses_the_accounts_folder_list_and_layout(db, accounts, mailb
     assert errors == []
     assert [result["email_id"] for result in results] == [mail.id]
     assert calls == ["small"]
-    assert mailboxes["second"].moves == [("7", "Inbox/delivery")]
+    assert mailboxes["second"].moves == [(["7"], "Inbox/delivery")]
 
 
 def test_account_without_model_leaves_mails_unprocessed(db, accounts, monkeypatch):

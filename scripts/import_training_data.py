@@ -4,7 +4,7 @@ from src.config import primary_account
 from src.db.database import SessionLocal, engine, ensure_email_columns
 from src.db.models import Base, Email
 from src.api.utils.folder_rules import folder_path, folder_rules
-from src.api.utils.imap_client import _message_id, open_mailbox
+from src.mail import open_mailbox
 
 def import_training_data():
     # The insert names every mapped column, so an old database is migrated first.
@@ -20,20 +20,17 @@ def import_training_data():
     }
 
     with open_mailbox(account) as mailbox:
+        existing = set(mailbox.folders())
         for label in folder_rules(account):
             folder = folder_path(label, account)
-
-            # Check if folder exists
-            try:
-                mailbox.folder.set(folder)
-            except Exception:
+            if folder not in existing:
                 print(f"Folder not found: {folder}")
                 continue
 
             print(f"Importing from {folder} → true_label: {label}")
 
-            for msg in mailbox.fetch():
-                message_id = _message_id(msg) or None
+            for msg in mailbox.read_folder(folder).messages:
+                message_id = msg.message_id or None
                 if message_id in stored_message_ids:
                     continue
                 if message_id:
@@ -45,7 +42,7 @@ def import_training_data():
                     folder_list=account.folder_list,
                     message_id=message_id,
                     subject=msg.subject,
-                    sender=msg.from_,
+                    sender=msg.sender,
                     date=msg.date,
                     text=msg.text,
                     html=msg.html,

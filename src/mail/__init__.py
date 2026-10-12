@@ -1,6 +1,6 @@
 """Mail providers behind one interface (src/mail/base.py)."""
 
-from .base import FolderState, Mailbox, MailMessage
+from .base import CursorExpired, FolderState, Mailbox, MailMessage
 
 
 def open_mailbox(account) -> Mailbox:
@@ -14,4 +14,4 @@ def open_mailbox(account) -> Mailbox:
     )
 
 
-__all__ = ["FolderState", "Mailbox", "MailMessage", "open_mailbox"]
+__all__ = ["CursorExpired", "FolderState", "Mailbox", "MailMessage", "open_mailbox"]

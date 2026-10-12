@@ -3,10 +3,9 @@ import os
 import re
 from datetime import date, datetime, timedelta, timezone
 
-from imap_tools import AND, H
 from src.db.database import SessionLocal
-from src.db.models import Email
-from src.mail.imap import connect as open_mailbox
+from src.db.models import Email, MailSyncState
+from src.mail import CursorExpired, open_mailbox
 
 from .mail_identity import fingerprint, is_same_mail, normalized_date
 from .folder_rules import (
@@ -22,41 +21,14 @@ logger = logging.getLogger(__name__)
 
 # Sent mails are only needed to recognise replies, so only recent ones are read.
 SENT_SYNC_DAYS = int(os.getenv("SMIO_SENT_SYNC_DAYS", "30"))
-
-
-def _header(message, name):
-    headers = getattr(message, "headers", {}) or {}
-    value = headers.get(name) or ""
-    if isinstance(value, (list, tuple)):
-        value = value[0] if value else ""
-    return str(value).strip()
-
-
-def _message_id(message):
-    return _header(message, "Message-ID") or _header(message, "Message-Id")
+# Between complete reads, a sync only reads what arrived in each folder. Only a
+# complete read notices mails that left (deleted, or moved to an unwatched
+# folder) and mails marked read.
+FULL_SYNC_MINUTES = int(os.getenv("SMIO_FULL_SYNC_MINUTES", "60"))
 
 
 def _message_ids(value):
     return re.findall(r"<[^<>\s]+>", value or "")
-
-
-def _sent_folder(mailbox, account):
-    """The account's sent folder: configured, else the one flagged \\Sent."""
-    if account.mailbox.sent:
-        return account.mailbox.sent
-    for folder in mailbox.folder.list():
-        if "\\Sent" in (getattr(folder, "flags", ()) or ()):
-            return folder.name
-    return None
-
-
-def _is_seen(message):
-    flags = getattr(message, "flags", ()) or ()
-    return any(
-        (flag.decode(errors="ignore") if isinstance(flag, bytes) else str(flag)).lower()
-        == "\\seen"
-        for flag in flags
-    )
 
 
 def _verify_uid(mailbox, email, folder):
@@ -67,13 +39,9 @@ def _verify_uid(mailbox, email, folder):
     """
     if not email.uid:
         raise ValueError(f"Email {email.id} has no IMAP UID")
-    mailbox.folder.set(folder, readonly=True)
-    message = next(
-        mailbox.fetch(uid_list=[email.uid], mark_seen=False, headers_only=True),
-        None,
-    )
+    message = mailbox.get(folder, email.uid)
     if message is not None and not is_same_mail(
-        email, _message_id(message), message.subject, message.date
+        email, message.message_id, message.subject, message.date
     ):
         raise ValueError(f"Email {email.id}: UID {email.uid} in {folder} now holds another mail")
     return message
@@ -93,10 +61,7 @@ def move_email_to_classification_folder(mailbox, email, account):
         logger.warning("Email %s is no longer in %s; not moving it", email.id, source_folder)
         return None
 
-    if not mailbox.folder.exists(destination):
-        mailbox.folder.create(destination)
-    mailbox.folder.set(source_folder, readonly=False)
-    mailbox.move(email.uid, destination)
+    mailbox.move(source_folder, [email.uid], destination)
     # The destination assigns a new UID; the next sync records it.
     email.uid = None
     return destination
@@ -111,18 +76,14 @@ def move_email_to_inbox(mailbox, email, account):
         return email.uid
 
     source_folder = email.folder
-    if not mailbox.folder.exists(source_folder):
-        raise ValueError(f"IMAP source folder does not exist: {source_folder}")
     if _verify_uid(mailbox, email, source_folder) is None:
         raise ValueError(f"Email {email.id} is no longer in {source_folder}")
-    mailbox.folder.set(source_folder, readonly=False)
-    mailbox.move([email.uid], inbox)
-    mailbox.folder.set(inbox, readonly=False)
+    mailbox.move(source_folder, [email.uid], inbox)
 
     # UIDs are per folder: the old one may now belong to another INBOX mail.
     if not email.message_id:
         return None
-    uids = mailbox.uids(AND(header=H("Message-ID", email.message_id)))
+    uids = mailbox.find(inbox, email.message_id)
     return uids[-1] if uids else None
 
 
@@ -133,25 +94,24 @@ def _folder_names(mailbox, account):
         folder_path(classification, account) for classification in folder_rules(account)
     }
     return [
-        *[
-            folder.name
-            for folder in mailbox.folder.list()
-            if folder.name in known_folders
-        ],
+        *[folder for folder in mailbox.folders() if folder in known_folders],
         inbox_folder(account),
     ]
 
 
 def _identity(account, msg):
-    message_id = _message_id(msg)
-    return message_id, fingerprint(
-        account.id, msg.from_, msg.subject, msg.date, message_id, msg.text, msg.html
+    return msg.message_id, fingerprint(
+        account.id, msg.sender, msg.subject, msg.date, msg.message_id, msg.text, msg.html
     )
 
 
-def _find_email(db, account, message_id, mail_fingerprint, subject, date):
-    """Stored mail for a server message: by Message-ID, else by fingerprint."""
+def _find_email(db, account, message_id, mail_fingerprint, subject, date, provider_id=None):
+    """Stored mail for a server message: by provider id, Message-ID, else fingerprint."""
     emails = db.query(Email).filter(Email.account == account.id)
+    if provider_id:
+        email_obj = emails.filter(Email.provider_message_id == provider_id).first()
+        if email_obj is not None:
+            return email_obj
     if message_id:
         for email_obj in emails.filter(Email.message_id == message_id).order_by(Email.id):
             # Some senders reuse Message-IDs; a different subject or a different
@@ -171,12 +131,7 @@ def _find_email(db, account, message_id, mail_fingerprint, subject, date):
 def _move_to_trash(mailbox, email, account):
     if not email.uid or not email.folder:
         raise ValueError(f"Email {email.id} has no folder or IMAP UID")
-    trash = trash_folder(account)
-    if not mailbox.folder.exists(trash):
-        mailbox.folder.create(trash)
-    mailbox.folder.set(email.folder, readonly=False)
-    mailbox.move([email.uid], trash)
-    mailbox.folder.set(inbox_folder(account), readonly=False)
+    mailbox.trash(email.folder, [email.uid])
     # The trash assigns its own UID; the old one must not be reused.
     email.uid = None
 
@@ -223,7 +178,7 @@ def cleanup_expired_mails(db, mailbox, account):
                 if current_message is None:
                     continue
 
-                is_seen = _is_seen(current_message)
+                is_seen = current_message.seen
                 applicable_period = retention_days if is_seen else retention_days_unread
                 if applicable_period is None or email.date > now - timedelta(days=applicable_period):
                     if not is_seen:
@@ -258,7 +213,9 @@ def _sync_message(
     db, account, msg, folder_name, allow_new, seen_ids=(), new_emails=None, outbound=False
 ):
     message_id, mail_fingerprint = _identity(account, msg)
-    email_obj = _find_email(db, account, message_id, mail_fingerprint, msg.subject, msg.date)
+    email_obj = _find_email(
+        db, account, message_id, mail_fingerprint, msg.subject, msg.date, msg.provider_id
+    )
     if email_obj is not None and email_obj.id in seen_ids:
         # A copy of a mail already seen in this sync in a folder scanned earlier.
         return None
@@ -284,9 +241,11 @@ def _sync_message(
         email_obj.processing_batch = None
     email_obj.message_id = message_id
     email_obj.fingerprint = mail_fingerprint
-    in_reply_to = _message_ids(_header(msg, "In-Reply-To"))
+    if msg.provider_id:
+        email_obj.provider_message_id = msg.provider_id
+    in_reply_to = _message_ids(msg.header("In-Reply-To"))
     email_obj.in_reply_to = in_reply_to[0] if in_reply_to else None
-    email_obj.reference_ids = " ".join(_message_ids(_header(msg, "References"))) or None
+    email_obj.reference_ids = " ".join(_message_ids(msg.header("References"))) or None
 
     sync_timestamp = datetime.now(timezone.utc).replace(tzinfo=None)
     email_obj.last_seen_at = sync_timestamp
@@ -295,14 +254,14 @@ def _sync_message(
         email_obj.removal_reason = None
     previous_folder = email_obj.folder
     previous_classification = email_obj.classification
-    email_obj.uid = msg.uid
+    email_obj.uid = msg.ref
     email_obj.folder = folder_name
     email_obj.subject = msg.subject
-    email_obj.sender = msg.from_
+    email_obj.sender = msg.sender
     email_obj.date = msg.date
     email_obj.text = msg.text
     email_obj.html = msg.html
-    if _is_seen(msg) and email_obj.read_at is None:
+    if msg.seen and email_obj.read_at is None:
         email_obj.read_at = datetime.now(timezone.utc).replace(tzinfo=None)
         logger.info("Email %s first observed as read", email_obj.id)
 
@@ -350,72 +309,111 @@ def _sync_message(
     return email_obj
 
 
-def _sync_sent(db, mailbox, account, allow_new, seen_ids):
-    """Store recent sent mails so replies can update the status of what they answer.
-
-    Scanned after the inbox, so a mail sent to oneself keeps its inbox copy. Not
-    part of the stale check: older sent mails are simply not read.
-    """
-    sent = _sent_folder(mailbox, account)
-    if not sent or not mailbox.folder.exists(sent):
-        return {"folder": None, "new": 0}
-    mailbox.folder.set(sent, readonly=True)
-    since = date.today() - timedelta(days=SENT_SYNC_DAYS)
-    new_sent = []
-    for msg in mailbox.fetch(AND(date_gte=since), mark_seen=False):
-        email_obj = _sync_message(
-            db, account, msg, sent, allow_new=allow_new,
-            seen_ids=seen_ids, new_emails=new_sent, outbound=True,
-        )
-        if email_obj is not None:
-            seen_ids.add(email_obj.id)
-    return {"folder": sent, "new": len(new_sent)}
+def _full_read_due(state, now):
+    return (
+        state is None
+        or not state.cursor
+        or state.full_sync_at is None
+        or state.full_sync_at <= now - timedelta(minutes=FULL_SYNC_MINUTES)
+    )
 
 
-def _sync_folders(account, allow_new):
+def _read(mailbox, folder, state, full, now, since=None):
+    """A folder's messages and whether they were read in full rather than from
+    the cursor on. A full read with since is complete only for that window."""
+    if not full and not _full_read_due(state, now):
+        try:
+            return mailbox.read_changes(folder, state.cursor), False
+        except CursorExpired:
+            logger.info("Cursor of %s expired; reading it completely", folder)
+    return mailbox.read_folder(folder, since=since), True
+
+
+def _save_cursor(db, account, states, folder_state, read_in_full, sync_started):
+    state = states.get(folder_state.folder)
+    if state is None:
+        state = MailSyncState(account=account.id, folder=folder_state.folder)
+        db.add(state)
+        states[folder_state.folder] = state
+    state.cursor = folder_state.cursor
+    state.updated_at = sync_started
+    if read_in_full:
+        state.full_sync_at = sync_started
+
+
+def _sync_folders(account, allow_new, full=False):
     """Reconcile the inbox and classification folders; new mails only from the inbox.
+
+    Each folder is read completely when due (FULL_SYNC_MINUTES, a new or
+    expired cursor, or full=True), otherwise only from its cursor on. Mails
+    stored in a completely read folder and not seen are marked removed.
 
     Copy rule: a mail present in several scanned folders keeps the first one
     seen. Classification folders are scanned before the inbox, so a copy left
     in the inbox neither moves the mail back nor counts as a correction.
+    Sent mails come last, so a mail sent to oneself keeps its inbox copy; only
+    the last SENT_SYNC_DAYS are read, as they only serve to recognise replies.
     """
     with open_mailbox(account) as mailbox:
         db = SessionLocal()
         try:
             sync_started = datetime.now(timezone.utc).replace(tzinfo=None)
-            folders = _folder_names(mailbox, account)
+            states = {
+                state.folder: state
+                for state in db.query(MailSyncState).filter(MailSyncState.account == account.id)
+            }
             inbox = inbox_folder(account)
-            active_folders = set(folders)
             checked = 0
             changed = 0
             new_emails = []
             seen_ids = set()
-            for folder_name in folders:
-                mailbox.folder.set(folder_name, readonly=True)
-                for msg in mailbox.fetch(mark_seen=False):
-                    checked += 1
-                    new_count = len(new_emails)
+            complete_folders = set()
+
+            def sync_folder(read, allow_new_here, outbound=False):
+                nonlocal checked, changed
+                folder_state, read_in_full = read
+                new_count = len(new_emails)
+                for msg in folder_state.messages:
+                    checked += 0 if outbound else 1
                     email_obj = _sync_message(
-                        db,
-                        account,
-                        msg,
-                        folder_name,
-                        allow_new=allow_new and folder_name == inbox,
-                        seen_ids=seen_ids,
-                        new_emails=new_emails,
+                        db, account, msg, folder_state.folder, allow_new=allow_new_here,
+                        seen_ids=seen_ids, new_emails=new_emails, outbound=outbound,
                     )
                     if email_obj is None:
                         continue
                     seen_ids.add(email_obj.id)
-                    if len(new_emails) == new_count:
+                    if not outbound and len(new_emails) == new_count:
                         changed += 1
-            sent_result = _sync_sent(db, mailbox, account, allow_new, seen_ids)
+                    new_count = len(new_emails)
+                if folder_state.complete:
+                    complete_folders.add(folder_state.folder)
+                _save_cursor(db, account, states, folder_state, read_in_full, sync_started)
+
+            for folder_name in _folder_names(mailbox, account):
+                sync_folder(
+                    _read(mailbox, folder_name, states.get(folder_name), full, sync_started),
+                    allow_new and folder_name == inbox,
+                )
+
+            sent = mailbox.sent_folder()
+            if sent not in mailbox.folders():
+                sent = None
+            new_before_sent = len(new_emails)
+            if sent:
+                since = date.today() - timedelta(days=SENT_SYNC_DAYS)
+                sync_folder(
+                    _read(mailbox, sent, states.get(sent), full, sync_started, since=since),
+                    allow_new, outbound=True,
+                )
+            sent_result = {"folder": sent, "new": len(new_emails) - new_before_sent}
+            del new_emails[new_before_sent:]
+
             # The stale check runs in SQL: write this sync's last_seen_at and
             # folders first (autoflush is off), or every mail seen counts as gone.
             db.flush()
             stale_emails = db.query(Email).filter(
                 Email.account == account.id,
-                Email.folder.in_(active_folders),
+                Email.folder.in_(complete_folders),
                 Email.is_training_data.is_(False),
                 (Email.last_seen_at.is_(None) | (Email.last_seen_at < sync_started)),
             ).all()
@@ -428,6 +426,7 @@ def _sync_folders(account, allow_new):
             return {
                 "checked": checked,
                 "changed": changed,
+                "complete_folders": sorted(complete_folders),
                 "sent": sent_result,
                 "cleanup": cleanup,
                 "new": new_emails,
@@ -440,8 +439,8 @@ def _sync_folders(account, allow_new):
 
 
 def sync_existing_mails(account):
-    """Reconcile known messages across the inbox and classification folders."""
-    result = _sync_folders(account, allow_new=False)
+    """Read every folder completely and reconcile the known messages."""
+    result = _sync_folders(account, allow_new=False, full=True)
     del result["new"]
     return result
 

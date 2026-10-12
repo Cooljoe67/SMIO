@@ -1,3 +1,4 @@
+import re
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -10,6 +11,7 @@ from src.api.utils.mail_identity import email_fingerprint, fingerprint, normaliz
 from src.config import primary_account
 from src.db import database
 from src.db.models import Base, Email
+from src.mail.imap import ImapMailbox, to_mail_message
 
 SENT = datetime(2026, 10, 7, 9, 30, tzinfo=timezone(timedelta(hours=2)))
 
@@ -42,7 +44,11 @@ class FakeServer:
         self.next_uid = 500
         self.moves = []
         self.criteria = {}
+        self.validity = {}
         self.folder = SimpleNamespace(
+            status=lambda name, options: {
+                "UIDVALIDITY": self.validity.get(name, 1), "UIDNEXT": self.next_uid + 1
+            },
             list=lambda: [
                 SimpleNamespace(name=name, flags=self.flags.get(name, ()))
                 for name in self.folders
@@ -58,13 +64,27 @@ class FakeServer:
     def __exit__(self, *exc):
         return False
 
+    def logout(self):
+        pass
+
     def _select(self, name, readonly=False):
         self.current = name
 
     def fetch(self, criteria="ALL", mark_seen=False, uid_list=None, headers_only=False):
         self.criteria[self.current] = str(criteria)
         messages = self.folders.get(self.current, [])
-        return iter([m for m in messages if uid_list is None or m.uid in uid_list])
+        uid_range = re.search(r"UID (\d+):\*", str(criteria))
+        return iter([
+            m for m in messages
+            if (uid_list is None or m.uid in uid_list)
+            and (uid_range is None or int(m.uid) >= int(uid_range.group(1)))
+        ])
+
+    def deliver(self, folder, message):
+        """A mail arriving: it gets the next UID, like on a real server."""
+        self.next_uid += 1
+        message.uid = str(self.next_uid)
+        self.folders[folder].append(message)
 
     def move(self, uids, destination):
         uids = [uids] if isinstance(uids, str) else list(uids)
@@ -77,6 +97,7 @@ class FakeServer:
 
     def renumber(self, folder):
         """What a server does when UIDVALIDITY changes."""
+        self.validity[folder] = self.validity.get(folder, 1) + 1
         for message in self.folders[folder]:
             self.next_uid += 1
             message.uid = str(self.next_uid)
@@ -90,9 +111,17 @@ def server(monkeypatch, db):
         holder["server"] = FakeServer(flags, **folders)
         return holder["server"]
 
-    monkeypatch.setattr(imap_client, "open_mailbox", lambda account: holder["server"])
+    monkeypatch.setattr(
+        imap_client, "open_mailbox", lambda account: ImapMailbox(account, connection=holder["server"])
+    )
+    # Read every folder completely on every sync, unless a test opts into deltas.
+    monkeypatch.setattr(imap_client, "FULL_SYNC_MINUTES", 0)
     monkeypatch.setattr(imap_client, "SessionLocal", lambda: db)
     return use
+
+
+def _adapter(server):
+    return ImapMailbox(primary_account(), connection=server)
 
 
 def _sync(new=True):
@@ -132,7 +161,7 @@ def test_backfilled_fingerprint_matches_a_later_sync(tmp_path, monkeypatch, serv
     assert database.backfill_fingerprints() == 1
     with Session() as session:
         stored = session.query(Email).one()
-        assert stored.fingerprint == imap_client._identity(primary_account(), message)[1]
+        assert stored.fingerprint == imap_client._identity(primary_account(), to_mail_message(message, "INBOX"))[1]
         assert stored.fingerprint == email_fingerprint(stored)
     engine.dispose()
 
@@ -155,7 +184,9 @@ def test_move_without_message_id_is_recognised_as_a_correction(db, server):
 
 
 def _predict(monkeypatch, mailbox, classification):
-    monkeypatch.setattr(inbox_processor, "open_mailbox", lambda account: mailbox)
+    monkeypatch.setattr(
+        inbox_processor, "open_mailbox", lambda account: ImapMailbox(account, connection=mailbox)
+    )
     monkeypatch.setattr(
         inbox_processor.classifier, "predict_email", lambda email, folder_list: (classification, 0.9)
     )
@@ -230,7 +261,7 @@ def test_mail_already_in_its_folder_is_not_moved(db, server):
     mailbox = server(**{"INBOX": [], "INBOX/tech": [_message("1")]})
     email = Email(id=1, account="primary", uid="1", message_id="<a@test>", folder="INBOX/tech", classification="tech")
 
-    assert imap_client.move_email_to_classification_folder(mailbox, email, primary_account()) is None
+    assert imap_client.move_email_to_classification_folder(_adapter(mailbox), email, primary_account()) is None
     assert mailbox.moves == []
     assert email.uid == "1"
 
@@ -318,7 +349,7 @@ def test_retention_does_not_trash_a_renumbered_uid(db, server, monkeypatch):
     mailbox.renumber("INBOX/tech")
     mailbox.folders["INBOX/tech"].append(_message("1", message_id="<new@test>", seen=True))
 
-    result = imap_client.cleanup_expired_mails(db, mailbox, primary_account())
+    result = imap_client.cleanup_expired_mails(db, _adapter(mailbox), primary_account())
 
     assert result["moved"] == 0
     assert "another mail" in result["errors"][0]["error"]
@@ -335,7 +366,7 @@ def test_retention_trashes_a_verified_mail_and_forgets_its_uid(db, server):
     ))
     db.commit()
 
-    result = imap_client.cleanup_expired_mails(db, mailbox, primary_account())
+    result = imap_client.cleanup_expired_mails(db, _adapter(mailbox), primary_account())
 
     email = db.query(Email).one()
     assert result["moved"] == 1

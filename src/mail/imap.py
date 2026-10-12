@@ -1,10 +1,10 @@
 """IMAP adapter (imap_tools)."""
 
-from imap_tools import AND, H, MailBox, MailboxLoginError, MailMessageFlags
+from imap_tools import AND, H, U, MailBox, MailboxLoginError, MailMessageFlags
 
 from src.storage import secret_store
 
-from .base import FolderState, Mailbox, MailMessage
+from .base import CursorExpired, FolderState, Mailbox, MailMessage
 
 
 def connect(account):
@@ -94,14 +94,44 @@ class ImapMailbox(Mailbox):
     def drafts_folder(self):
         return self.account.mailbox.drafts or self._flagged("\\Drafts")
 
+    def _cursor(self, folder):
+        """UIDVALIDITY and UIDNEXT: every later arrival gets a UID >= UIDNEXT.
+
+        Taken before fetching, so a mail arriving meanwhile is read again next
+        time rather than missed.
+        """
+        status = self.connection.folder.status(folder, ["UIDVALIDITY", "UIDNEXT"])
+        return f"{status['UIDVALIDITY']}:{status['UIDNEXT']}"
+
     def read_folder(self, folder, since=None):
+        cursor = self._cursor(folder)
         self._select(folder, readonly=True)
         criteria = AND(date_gte=since) if since else "ALL"
         messages = [
             to_mail_message(msg, folder)
             for msg in self.connection.fetch(criteria, mark_seen=False)
         ]
-        return FolderState(folder=folder, messages=messages, complete=since is None)
+        return FolderState(
+            folder=folder, messages=messages, complete=since is None, cursor=cursor
+        )
+
+    def read_changes(self, folder, cursor):
+        validity, _, next_uid = (cursor or "").partition(":")
+        current = self._cursor(folder)
+        if not next_uid.isdigit() or current.partition(":")[0] != validity:
+            raise CursorExpired(f"{folder}: UIDVALIDITY changed")
+        messages = []
+        if current != cursor:
+            self._select(folder, readonly=True)
+            # "N:*" also matches the highest UID when it is below N.
+            messages = [
+                to_mail_message(msg, folder)
+                for msg in self.connection.fetch(
+                    AND(uid=U(next_uid, "*")), mark_seen=False
+                )
+                if int(msg.uid) >= int(next_uid)
+            ]
+        return FolderState(folder=folder, messages=messages, complete=False, cursor=current)
 
     def get(self, folder, ref, headers_only=True):
         self._select(folder, readonly=True)
