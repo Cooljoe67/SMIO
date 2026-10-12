@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.config import primary_account
-from src.mail import open_mailbox
+from src.mail import CursorExpired, open_mailbox
 from src.mail.imap import ImapMailbox
 
 
@@ -19,6 +19,7 @@ class Connection:
         self.criteria = None
         self.appended = []
         self.logged_out = False
+        self.uid_next = 9
         self.folder = SimpleNamespace(
             list=lambda: [
                 SimpleNamespace(name=name, flags=self.flags.get(name, ()))
@@ -26,7 +27,7 @@ class Connection:
             ],
             set=self._select,
             exists=lambda name: name in self.folders,
-            status=lambda name, options: {"UIDVALIDITY": 3, "UIDNEXT": 9},
+            status=lambda name, options: {"UIDVALIDITY": 3, "UIDNEXT": self.uid_next},
             create=lambda name: self.folders.setdefault(name, []),
         )
 
@@ -90,6 +91,32 @@ def test_a_date_window_is_not_a_complete_folder():
 
     assert not state.complete
     assert "SINCE" in mailbox.connection.criteria
+
+
+def test_changes_are_the_mails_from_the_cursor_on():
+    mailbox = _mailbox(INBOX=[_msg("8"), _msg("9"), _msg("10")])
+    mailbox.connection.uid_next = 11
+
+    state = mailbox.read_changes("INBOX", "3:9")
+
+    assert [m.ref for m in state.messages] == ["9", "10"]
+    assert (state.complete, state.cursor) == (False, "3:11")
+    assert mailbox.connection.criteria == "(UID 9:*)"
+
+
+def test_without_new_uids_nothing_is_fetched():
+    mailbox = _mailbox(INBOX=[_msg("8")])
+
+    state = mailbox.read_changes("INBOX", "3:9")
+
+    assert (state.messages, state.cursor, mailbox.connection.criteria) == ([], "3:9", None)
+
+
+def test_a_renumbered_folder_expires_the_cursor():
+    mailbox = _mailbox(INBOX=[_msg("8")])
+
+    with pytest.raises(CursorExpired):
+        mailbox.read_changes("INBOX", "2:9")
 
 
 def test_get_returns_none_for_a_vanished_uid():
