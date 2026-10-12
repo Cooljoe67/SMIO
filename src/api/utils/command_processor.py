@@ -305,8 +305,9 @@ def process_instruction_mails(account, is_primary=False):
     with open_mailbox(account) as mailbox:
         inbox = inbox_folder(account)
         matches = []
-        for msg in mailbox.read_folder(inbox).messages:
-            if (msg.sender or "").strip().lower() != owner:
+        for msg in mailbox.read_folder(inbox, sender=owner).messages:
+            msg = msg.load()
+            if msg is None or (msg.sender or "").strip().lower() != owner:
                 continue
             command = _normalize_command(msg.subject, msg.text)
             if command is not None:

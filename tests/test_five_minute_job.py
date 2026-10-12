@@ -26,10 +26,10 @@ accounts:
     folder_list: default
     imap: {host: imap.second, username: second@test, password: x}
   - id: mail
-    provider: gmail
+    provider: exchange
     email: mail@test
     folder_list: default
-    gmail: {client_id: a, client_secret: b, refresh_token: c}
+    exchange: {tenant_id: t, client_id: a, client_secret: b}
 """
 
 
@@ -82,7 +82,7 @@ def test_failed_account_answers_500_after_all_accounts_ran(accounts, client, mon
         "accounts": {
             "first": {"error": "login failed"},
             "second": {"processed": 1},
-            "mail": {"skipped": True, "reason": "provider_gmail_not_supported"},
+            "mail": {"skipped": True, "reason": "provider_exchange_not_supported"},
         }
     }
     assert events == ["first", "second", "persisted"]

@@ -57,13 +57,20 @@ def _identity(account, msg):
     )
 
 
+def _find_by_provider_id(db, account, provider_id):
+    if not provider_id:
+        return None
+    return db.query(Email).filter(
+        Email.account == account.id, Email.provider_message_id == provider_id
+    ).first()
+
+
 def _find_email(db, account, message_id, mail_fingerprint, subject, date, provider_id=None):
     """Stored mail for a server message: by provider id, Message-ID, else fingerprint."""
+    email_obj = _find_by_provider_id(db, account, provider_id)
+    if email_obj is not None:
+        return email_obj
     emails = db.query(Email).filter(Email.account == account.id)
-    if provider_id:
-        email_obj = emails.filter(Email.provider_message_id == provider_id).first()
-        if email_obj is not None:
-            return email_obj
     if message_id:
         for email_obj in emails.filter(Email.message_id == message_id).order_by(Email.id):
             # Some senders reuse Message-IDs; a different subject or a different
@@ -90,15 +97,26 @@ def observe(
     Returns the stored mail, or None for a copy already seen in this sync or a
     new mail that may not be stored here (allow_new).
     """
-    message_id, mail_fingerprint = _identity(account, msg)
-    email_obj = _find_email(
-        db, account, message_id, mail_fingerprint, msg.subject, msg.date, msg.provider_id
-    )
+    email_obj = None
+    if not msg.loaded:
+        # A stub: its content is fetched only for a mail not stored yet.
+        email_obj = _find_by_provider_id(db, account, msg.provider_id)
+        if email_obj is None:
+            if not (allow_new and msg.importable):
+                return None
+            msg = msg.load()
+            if msg is None:
+                return None
+    if msg.loaded:
+        message_id, mail_fingerprint = _identity(account, msg)
+        email_obj = _find_email(
+            db, account, message_id, mail_fingerprint, msg.subject, msg.date, msg.provider_id
+        )
     if email_obj is not None and email_obj.id in seen_ids:
         # A copy of a mail already seen in this sync in a folder scanned earlier.
         return None
     new_email = email_obj is None
-    if new_email and not allow_new:
+    if new_email and not (allow_new and msg.importable):
         return None
     received = new_email
     if new_email:
@@ -119,13 +137,14 @@ def observe(
         email_obj.processed = 0
         email_obj.processing_batch = None
         received = True
-    email_obj.message_id = message_id
-    email_obj.fingerprint = mail_fingerprint
     if msg.provider_id:
         email_obj.provider_message_id = msg.provider_id
-    in_reply_to = _message_ids(msg.header("In-Reply-To"))
-    email_obj.in_reply_to = in_reply_to[0] if in_reply_to else None
-    email_obj.reference_ids = " ".join(_message_ids(msg.header("References"))) or None
+    if msg.loaded:
+        email_obj.message_id = message_id
+        email_obj.fingerprint = mail_fingerprint
+        in_reply_to = _message_ids(msg.header("In-Reply-To"))
+        email_obj.in_reply_to = in_reply_to[0] if in_reply_to else None
+        email_obj.reference_ids = " ".join(_message_ids(msg.header("References"))) or None
 
     email_obj.last_seen_at = _utcnow()
     if email_obj.removal_reason == "external":
@@ -135,11 +154,12 @@ def observe(
     previous_folder = email_obj.folder
     email_obj.uid = msg.ref
     email_obj.folder = folder_name
-    email_obj.subject = msg.subject
-    email_obj.sender = msg.sender
-    email_obj.date = msg.date
-    email_obj.text = msg.text
-    email_obj.html = msg.html
+    if msg.loaded:
+        email_obj.subject = msg.subject
+        email_obj.sender = msg.sender
+        email_obj.date = msg.date
+        email_obj.text = msg.text
+        email_obj.html = msg.html
     first_read = msg.seen and email_obj.read_at is None
     if first_read:
         email_obj.read_at = _utcnow()

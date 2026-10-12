@@ -10,7 +10,7 @@ sync code, so every provider produces the same events.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Optional
+from typing import Callable, Optional
 
 
 @dataclass
@@ -21,15 +21,28 @@ class MailMessage:
     ref: str
     # Stable across moves (Gmail message id, Exchange ImmutableId); None for IMAP.
     provider_id: Optional[str]
-    message_id: str
-    subject: str
-    sender: str
-    date: Optional[datetime]
+    message_id: str = ""
+    subject: str = ""
+    sender: str = ""
+    date: Optional[datetime] = None
     text: str = ""
     html: str = ""
     seen: bool = False
     # First value of each header, keyed by lowercase name.
     headers: dict = field(default_factory=dict)
+    # False: outside the provider's import window; a sync stores no new mail from it.
+    importable: bool = True
+    # Set on a stub, which carries only ref, provider_id and seen: returns the
+    # full message, or None if it was deleted meanwhile. Providers whose content costs a request each (Gmail) list
+    # stubs, so a sync fetches content only for mail it has not stored yet.
+    loader: Optional[Callable[[], "MailMessage"]] = field(default=None, repr=False, compare=False)
+
+    @property
+    def loaded(self):
+        return self.loader is None
+
+    def load(self):
+        return self if self.loader is None else self.loader()
 
     def header(self, name):
         return self.headers.get(name.lower(), "")
@@ -82,8 +95,9 @@ class Mailbox(ABC):
         """The folder with drafts, or None."""
 
     @abstractmethod
-    def read_folder(self, folder, since: Optional[date] = None):
-        """Messages in a folder as a FolderState; complete unless since is given."""
+    def read_folder(self, folder, since: Optional[date] = None, sender=None):
+        """Messages in a folder as a FolderState, possibly stubs (MailMessage.load);
+        complete unless since or sender (an address) narrows it."""
 
     @abstractmethod
     def read_changes(self, folder, cursor):

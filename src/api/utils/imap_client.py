@@ -53,8 +53,9 @@ def move_email_to_classification_folder(mailbox, email, account):
         return None
 
     mailbox.move(source_folder, [email.uid], destination)
-    # The destination assigns a new UID; the next sync records it.
-    email.uid = None
+    if not email.provider_message_id:
+        # IMAP: the destination assigns a new UID; the next sync records it.
+        email.uid = None
     return destination
 
 

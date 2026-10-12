@@ -158,7 +158,7 @@ def test_closing_logs_out():
 
 
 def test_providers_without_an_adapter_are_refused():
-    account = primary_account().model_copy(update={"provider": "gmail"})
+    account = primary_account().model_copy(update={"provider": "exchange"})
 
-    with pytest.raises(NotImplementedError, match="gmail"):
+    with pytest.raises(NotImplementedError, match="exchange"):
         open_mailbox(account)

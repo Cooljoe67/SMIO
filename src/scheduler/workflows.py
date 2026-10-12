@@ -12,6 +12,7 @@ from src.ai.daily_summary import (
 )
 from src.ai.retrain import retrain_if_due
 from src.api.utils.command_processor import process_instruction_mails
+from src.mail import PROVIDERS
 from src.mail.events import dispatch as dispatch_events
 from src.mail.sync import fetch_inbox
 from src.api.utils.inbox_processor import process_unprocessed_emails
@@ -81,7 +82,7 @@ def run_five_minute_workflow():
     def routine():
         results = {}
         for position, account in enumerate(get_config().accounts):
-            if account.provider != "imap":
+            if account.provider not in PROVIDERS:
                 results[account.id] = {"skipped": True, "reason": f"provider_{account.provider}_not_supported"}
                 continue
             try:

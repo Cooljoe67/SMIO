@@ -31,7 +31,8 @@ def import_training_data():
 
             print(f"Importing from {folder} → true_label: {label}")
 
-            for msg in mailbox.read_folder(folder).messages:
+            loaded = (stub.load() for stub in mailbox.read_folder(folder).messages)
+            for msg in filter(None, loaded):
                 message_id = msg.message_id or None
                 if message_id in stored_message_ids:
                     continue

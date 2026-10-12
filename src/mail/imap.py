@@ -103,16 +103,18 @@ class ImapMailbox(Mailbox):
         status = self.connection.folder.status(folder, ["UIDVALIDITY", "UIDNEXT"])
         return f"{status['UIDVALIDITY']}:{status['UIDNEXT']}"
 
-    def read_folder(self, folder, since=None):
+    def read_folder(self, folder, since=None, sender=None):
         cursor = self._cursor(folder)
         self._select(folder, readonly=True)
-        criteria = AND(date_gte=since) if since else "ALL"
+        conditions = {"date_gte": since, "from_": sender}
+        conditions = {key: value for key, value in conditions.items() if value}
+        criteria = AND(**conditions) if conditions else "ALL"
         messages = [
             to_mail_message(msg, folder)
             for msg in self.connection.fetch(criteria, mark_seen=False)
         ]
         return FolderState(
-            folder=folder, messages=messages, complete=since is None, cursor=cursor
+            folder=folder, messages=messages, complete=not conditions, cursor=cursor
         )
 
     def read_changes(self, folder, cursor):
