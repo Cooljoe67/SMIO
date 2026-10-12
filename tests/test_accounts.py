@@ -9,6 +9,7 @@ from src import config
 from src.api.utils import command_processor, imap_client, inbox_processor
 from src.db import database
 from src.db.models import Base, Email
+from src.mail import sync as mail_sync
 from src.mail.imap import ImapMailbox, to_mail_message
 from src.scheduler import workflows
 
@@ -73,8 +74,7 @@ def mailboxes(monkeypatch):
     def open_mailbox(account):
         return ImapMailbox(account, connection=opened.setdefault(account.id, FakeMailBox()))
 
-    for module in (imap_client, inbox_processor):
-        monkeypatch.setattr(module, "open_mailbox", open_mailbox)
+    monkeypatch.setattr(inbox_processor, "open_mailbox", open_mailbox)
     # UID verification has its own tests in test_mail_identity.py.
     monkeypatch.setattr(imap_client, "_verify_uid", lambda mailbox, email, folder: object())
     return opened
@@ -114,8 +114,8 @@ def test_same_message_in_two_accounts_is_stored_twice(db, accounts):
     first, second = accounts
     message = _message("1", "<shared@test>")
 
-    imap_client._sync_message(db, first, message, "INBOX", allow_new=True)
-    imap_client._sync_message(db, second, message, "Inbox", allow_new=True)
+    mail_sync.observe(db, first, message, "INBOX", allow_new=True)
+    mail_sync.observe(db, second, message, "Inbox", allow_new=True)
     db.commit()
 
     stored = db.query(Email).order_by(Email.account).all()
@@ -129,7 +129,7 @@ def test_folder_move_is_a_correction_in_that_accounts_folder_layout(db, accounts
     _, second = accounts
     email = _email(db, second, 1, "Inbox", classification="other")
 
-    imap_client._sync_message(
+    mail_sync.observe(
         db, second, _message("1", email.message_id), "Inbox/delivery", allow_new=False
     )
 

@@ -1,13 +1,13 @@
 import pytest
 
-from src.api.utils import imap_client
+from src.mail import sync as mail_sync
 from src.db.models import Email, MailSyncState
 from tests.test_mail_identity import _message, _sync, server  # noqa: F401
 
 
 @pytest.fixture
 def deltas(monkeypatch):
-    monkeypatch.setattr(imap_client, "FULL_SYNC_MINUTES", 60)
+    monkeypatch.setattr(mail_sync, "FULL_SYNC_MINUTES", 60)
 
 
 def test_between_full_reads_only_new_mail_is_read(db, server, deltas):

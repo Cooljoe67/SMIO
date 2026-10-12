@@ -56,6 +56,7 @@ def test_account_result_is_json_safe(accounts, monkeypatch):
     monkeypatch.setattr(workflows, "SessionLocal", lambda: SimpleNamespace(close=lambda: None))
     monkeypatch.setattr(workflows, "process_unprocessed_emails", lambda db, account: (4, [], []))
     monkeypatch.setattr(workflows, "update_statuses_from_replies", lambda db, account: {})
+    monkeypatch.setattr(workflows, "dispatch_events", lambda db, account: {})
 
     result = workflows._process_account(accounts[0], is_primary=True)
 

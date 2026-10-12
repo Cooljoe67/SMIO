@@ -14,6 +14,7 @@ from src.api.utils.imap_client import (
     move_email_to_inbox,
 )
 from src.mail import open_mailbox
+from src.mail.events import record
 
 
 logger = logging.getLogger(__name__)
@@ -120,8 +121,13 @@ def process_email_by_id(email_id: int, db: Session, account, batch_id: int = Non
             result["sources"] = sources
             result["ner_executed"] = True
 
+        source_folder = email.folder
         destination = move_email_to_classification_folder(mailbox, email, account)
         if destination:
+            record(
+                db, account, email, "moved",
+                from_folder=source_folder, to_folder=destination, source="system",
+            )
             email.folder = destination
             result["folder"] = destination
             logger.info("Email %s moved to %s", email_id, destination)
@@ -262,7 +268,14 @@ def undo_processing_batches(db: Session, account, count: int = 1):
     with open_mailbox(account) as mailbox:
         for email in emails:
             try:
+                source_folder = email.folder
                 new_uid = move_email_to_inbox(mailbox, email, account)
+                if source_folder != inbox_folder(account):
+                    record(
+                        db, account, email, "moved",
+                        from_folder=source_folder, to_folder=inbox_folder(account),
+                        source="system",
+                    )
                 # The old UID belonged to the source folder; never keep it.
                 email.uid = new_uid
                 if not new_uid:

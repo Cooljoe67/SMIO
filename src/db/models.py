@@ -132,6 +132,50 @@ class MailSyncState(Base):
     updated_at = Column(DateTime, default=_utcnow, nullable=False)
 
 
+class MailEvent(Base):
+    """A change of a mail's state, in the provider-neutral format of
+    src/mail/events.py; also the outbox its actions are run from."""
+
+    __tablename__ = "mail_events"
+    __table_args__ = (UniqueConstraint("email_id", "seq"),)
+
+    id = Column(Integer, primary_key=True)
+    # "<account>:<email id>:<seq>"; identifies the event to actions and consumers.
+    event_key = Column(String, nullable=False, unique=True)
+    account = Column(String, nullable=False, index=True)
+    provider = Column(String, nullable=False)
+    email_id = Column(Integer, nullable=False, index=True)
+    # Numbers the events of one mail; a second detector recording the same
+    # change collides on (email_id, seq) instead of recording it twice.
+    seq = Column(Integer, nullable=False)
+    event_type = Column(String, nullable=False)
+    message_id = Column(String, nullable=True)
+    from_folder = Column(String, nullable=True)
+    to_folder = Column(String, nullable=True)
+    # "user": found on the server; "system": done by SMIO.
+    source = Column(String, nullable=False)
+    occurred_at = Column(DateTime, default=_utcnow, nullable=False)
+    # Set once every action that applies has run or given up.
+    dispatched_at = Column(DateTime, nullable=True, index=True)
+
+
+class MailEventAction(Base):
+    """One action's run for one event; at most one row per pair, so an action
+    never runs twice for the same event."""
+
+    __tablename__ = "mail_event_actions"
+    __table_args__ = (UniqueConstraint("event_id", "action"),)
+
+    id = Column(Integer, primary_key=True)
+    event_id = Column(Integer, nullable=False, index=True)
+    action = Column(String, nullable=False)
+    # running (claimed; stays so if the process died during the action), done, failed.
+    status = Column(String, nullable=False)
+    attempts = Column(Integer, default=0, nullable=False)
+    error = Column(Text, nullable=True)
+    updated_at = Column(DateTime, default=_utcnow, nullable=False)
+
+
 class SummarySnapshot(Base):
     __tablename__ = "summary_snapshots"
 

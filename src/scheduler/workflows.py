@@ -12,7 +12,8 @@ from src.ai.daily_summary import (
 )
 from src.ai.retrain import retrain_if_due
 from src.api.utils.command_processor import process_instruction_mails
-from src.api.utils.imap_client import fetch_inbox
+from src.mail.events import dispatch as dispatch_events
+from src.mail.sync import fetch_inbox
 from src.api.utils.inbox_processor import process_unprocessed_emails
 from src.api.utils.mailer import append_summary_to_inbox
 from src.api.utils.reply_tracking import update_statuses_from_replies
@@ -57,6 +58,7 @@ def _process_account(account, is_primary):
     try:
         batch_id, results, errors = process_unprocessed_emails(db, account)
         status_result = update_statuses_from_replies(db, account)
+        events_result = dispatch_events(db, account)
     finally:
         db.close()
 
@@ -70,6 +72,7 @@ def _process_account(account, is_primary):
         "failed": len(errors),
         "errors": errors,
         "reply_status": status_result,
+        "events": events_result,
     }
 
 

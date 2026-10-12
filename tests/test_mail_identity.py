@@ -11,6 +11,7 @@ from src.api.utils.mail_identity import email_fingerprint, fingerprint, normaliz
 from src.config import primary_account
 from src.db import database
 from src.db.models import Base, Email
+from src.mail import sync as mail_sync
 from src.mail.imap import ImapMailbox, to_mail_message
 
 SENT = datetime(2026, 10, 7, 9, 30, tzinfo=timezone(timedelta(hours=2)))
@@ -112,11 +113,11 @@ def server(monkeypatch, db):
         return holder["server"]
 
     monkeypatch.setattr(
-        imap_client, "open_mailbox", lambda account: ImapMailbox(account, connection=holder["server"])
+        mail_sync, "open_mailbox", lambda account: ImapMailbox(account, connection=holder["server"])
     )
     # Read every folder completely on every sync, unless a test opts into deltas.
-    monkeypatch.setattr(imap_client, "FULL_SYNC_MINUTES", 0)
-    monkeypatch.setattr(imap_client, "SessionLocal", lambda: db)
+    monkeypatch.setattr(mail_sync, "FULL_SYNC_MINUTES", 0)
+    monkeypatch.setattr(mail_sync, "SessionLocal", lambda: db)
     return use
 
 
@@ -127,8 +128,8 @@ def _adapter(server):
 def _sync(new=True):
     account = primary_account()
     if new:
-        return imap_client.fetch_inbox(account)
-    return imap_client.sync_existing_mails(account)
+        return mail_sync.fetch_inbox(account)
+    return mail_sync.sync_existing_mails(account)
 
 
 def test_fingerprint_ignores_the_folder_and_uses_the_body_only_without_message_id():
@@ -161,7 +162,7 @@ def test_backfilled_fingerprint_matches_a_later_sync(tmp_path, monkeypatch, serv
     assert database.backfill_fingerprints() == 1
     with Session() as session:
         stored = session.query(Email).one()
-        assert stored.fingerprint == imap_client._identity(primary_account(), to_mail_message(message, "INBOX"))[1]
+        assert stored.fingerprint == mail_sync._identity(primary_account(), to_mail_message(message, "INBOX"))[1]
         assert stored.fingerprint == email_fingerprint(stored)
     engine.dispose()
 

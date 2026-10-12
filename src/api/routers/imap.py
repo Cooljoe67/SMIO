@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends
 
 from ..dependencies import requested_account
-from ..utils.imap_client import fetch_inbox, sync_existing_mails
+from src.mail.sync import fetch_inbox, sync_existing_mails
 
 router = APIRouter(prefix="/imap", tags=["IMAP"])
 

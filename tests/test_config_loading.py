@@ -197,6 +197,7 @@ def test_five_minute_workflow_reports_the_unavailable_account(monkeypatch):
     monkeypatch.setattr(workflows, "SessionLocal", lambda: SimpleNamespace(close=lambda: None))
     monkeypatch.setattr(workflows, "process_unprocessed_emails", lambda db, account: (None, [], []))
     monkeypatch.setattr(workflows, "update_statuses_from_replies", lambda db, account: {})
+    monkeypatch.setattr(workflows, "dispatch_events", lambda db, account: {})
 
     results = workflows.run_five_minute_workflow()["accounts"]
 
