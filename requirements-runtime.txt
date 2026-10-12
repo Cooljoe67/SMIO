@@ -25,4 +25,6 @@ google-cloud-storage
 google-cloud-secret-manager
 google-cloud-logging
 google-auth
+# Gmail API calls (google.auth.transport.requests)
+requests
 sqlalchemy

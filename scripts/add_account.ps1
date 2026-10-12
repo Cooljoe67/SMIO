@@ -7,12 +7,22 @@ param(
     [string]$ImapHost = "",
     [string]$ImapUser = "",
     [string]$Email = "",
-    [string]$FolderList = "default"
+    [string]$FolderList = "default",
+    [ValidateSet("imap", "gmail")]
+    [string]$Provider = "imap",
+    [string]$ClientId = ""
 )
 
-# Stores a new IMAP account's password in Secret Manager and prints the entry
-# to add to the service's config in GCS. The service reads the password at
-# login, so the account needs no redeploy.
+# Stores a new account's credentials in Secret Manager and prints the entry to
+# add to the service's config in GCS. The service reads them at login, so the
+# account needs no redeploy.
+#   IMAP:  the password, as imap-<id>-password.
+#   Gmail (-Provider gmail): opens the browser for the Google login and stores
+#          the refresh token as gmail-<id>-refresh-token, and once for all Gmail
+#          accounts the OAuth client secret as gmail-client-secret. Needs an
+#          OAuth client of type "Desktop app" (Google Auth Platform > Clients,
+#          app published "In production"). Run it again after revoking access
+#          or changing the Google password.
 
 $ErrorActionPreference = "Stop"
 
@@ -158,6 +168,119 @@ function ConvertTo-YamlString {
     return "'" + $Value.Replace("'", "''") + "'"
 }
 
+function Get-GcloudSecretValue {
+    param([string]$Name)
+
+    $value = & gcloud secrets versions access latest "--secret=$Name" "--project=$ProjectId"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not read secret '$Name'."
+    }
+    return ($value -join "`n")
+}
+
+function ConvertTo-Base64Url {
+    param([byte[]]$Bytes)
+
+    return [Convert]::ToBase64String($Bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+}
+
+function New-RandomBase64Url {
+    param([int]$ByteCount)
+
+    $bytes = New-Object byte[] $ByteCount
+    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+    return ConvertTo-Base64Url $bytes
+}
+
+function Get-GmailToken {
+    # Google's OAuth flow for installed apps (with PKCE): the browser hands the
+    # code to a one-time listener on 127.0.0.1, which is exchanged for tokens.
+    param([string]$ClientId, [string]$ClientSecret, [string]$LoginHint)
+
+    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+    $listener.Start()
+    try {
+        $redirectUri = "http://127.0.0.1:$($listener.LocalEndpoint.Port)"
+        $verifier = New-RandomBase64Url 48
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        $challenge = ConvertTo-Base64Url ($sha256.ComputeHash([System.Text.Encoding]::ASCII.GetBytes($verifier)))
+        $state = New-RandomBase64Url 16
+        $query = [ordered]@{
+            client_id             = $ClientId
+            redirect_uri          = $redirectUri
+            response_type         = "code"
+            scope                 = "https://www.googleapis.com/auth/gmail.modify"
+            code_challenge        = $challenge
+            code_challenge_method = "S256"
+            state                 = $state
+            # A refresh token, also when this client was approved before.
+            access_type           = "offline"
+            prompt                = "consent"
+            login_hint            = $LoginHint
+        }
+        $pairs = foreach ($item in $query.GetEnumerator()) {
+            if (-not [string]::IsNullOrWhiteSpace($item.Value)) {
+                "$($item.Key)=$([Uri]::EscapeDataString($item.Value))"
+            }
+        }
+        $authUrl = "https://accounts.google.com/o/oauth2/v2/auth?" + ($pairs -join "&")
+        Write-Host "Opening the browser for the Google login. Google warns that it has not"
+        Write-Host "verified the app: choose 'Advanced', then 'Go to ... (unsafe)'. If no"
+        Write-Host "browser opens, visit:"
+        Write-Host $authUrl
+        Start-Process $authUrl
+
+        $answer = $null
+        while ($null -eq $answer) {
+            $connection = $listener.AcceptTcpClient()
+            try {
+                $stream = $connection.GetStream()
+                $requestLine = [System.IO.StreamReader]::new($stream).ReadLine()
+                $page = "SMIO"
+                if ($requestLine -match '^GET /\?(\S+) HTTP') {
+                    $answer = @{}
+                    foreach ($pair in $Matches[1] -split '&') {
+                        $name, $value = $pair -split '=', 2
+                        $answer[$name] = [Uri]::UnescapeDataString(([string]$value).Replace('+', ' '))
+                    }
+                    $page = "SMIO: login received. You can close this window."
+                }
+                $writer = [System.IO.StreamWriter]::new($stream)
+                $writer.Write("HTTP/1.1 200 OK`r`nContent-Type: text/plain; charset=utf-8`r`nConnection: close`r`n`r`n$page")
+                $writer.Flush()
+            }
+            catch {
+                # A browser's speculative connection that closed without a request.
+            }
+            finally {
+                $connection.Close()
+            }
+        }
+    }
+    finally {
+        $listener.Stop()
+    }
+
+    if ($answer["error"]) {
+        throw "Google login failed: $($answer['error'])"
+    }
+    if ($answer["state"] -ne $state) {
+        throw "The login answer does not belong to this request; run the script again."
+    }
+    $token = Invoke-RestMethod -Method Post -Uri "https://oauth2.googleapis.com/token" -Body @{
+        code          = $answer["code"]
+        client_id     = $ClientId
+        client_secret = $ClientSecret
+        redirect_uri  = $redirectUri
+        grant_type    = "authorization_code"
+        code_verifier = $verifier
+    }
+    if (-not $token.refresh_token) {
+        throw "Google returned no refresh token."
+    }
+    return $token
+}
+
 Assert-Command "gcloud"
 
 $AccountId = Read-RequiredValue $AccountId "Account id (lowercase letters, digits, hyphens; starts with a letter)"
@@ -166,32 +289,29 @@ $AccountId = Read-RequiredValue $AccountId "Account id (lowercase letters, digit
 if ($AccountId -cnotmatch '^[a-z][a-z0-9-]*$') {
     throw "Account id '$AccountId' must start with a lowercase letter and contain only lowercase letters, digits and hyphens."
 }
-$ImapHost = Read-RequiredValue $ImapHost "IMAP host"
-$ImapUser = Read-RequiredValue $ImapUser "IMAP username"
-$password = Read-HiddenValue "IMAP password"
-if ([string]::IsNullOrEmpty($password)) {
-    throw "An IMAP password is required."
-}
-
-$SecretName = "imap-$AccountId-password"
-Set-GcloudSecret $SecretName $password
-
 $GcsUri = "gs://$GcsBucket/$GcsConfigObject"
 $LocalCopy = Join-Path ([System.IO.Path]::GetTempPath()) "smio.yaml"
-if ([string]::IsNullOrWhiteSpace($Email)) {
-    $Email = $ImapUser
-}
-$YamlHost = ConvertTo-YamlString $ImapHost
-$YamlUser = ConvertTo-YamlString $ImapUser
-$YamlEmail = ConvertTo-YamlString $Email
 $YamlId = ConvertTo-YamlString $AccountId
 $YamlFolderList = ConvertTo-YamlString $FolderList
 
-Write-Host ""
-Write-Host "Add this entry under 'accounts:' in the service's config (adjust the mailbox"
-Write-Host "folder names to this server):"
-Write-Host ""
-Write-Host @"
+if ($Provider -eq "imap") {
+    $ImapHost = Read-RequiredValue $ImapHost "IMAP host"
+    $ImapUser = Read-RequiredValue $ImapUser "IMAP username"
+    $password = Read-HiddenValue "IMAP password"
+    if ([string]::IsNullOrEmpty($password)) {
+        throw "An IMAP password is required."
+    }
+
+    $SecretName = "imap-$AccountId-password"
+    Set-GcloudSecret $SecretName $password
+
+    if ([string]::IsNullOrWhiteSpace($Email)) {
+        $Email = $ImapUser
+    }
+    $YamlHost = ConvertTo-YamlString $ImapHost
+    $YamlUser = ConvertTo-YamlString $ImapUser
+    $YamlEmail = ConvertTo-YamlString $Email
+    $Entry = @"
   - id: $YamlId
     provider: imap
     email: $YamlEmail
@@ -205,6 +325,63 @@ Write-Host @"
       username: $YamlUser
       password_secret: $SecretName
 "@
+    $EntryHint = "adjust the mailbox folder names to this server"
+}
+else {
+    $ClientId = Read-RequiredValue (Resolve-ConfigValue $ClientId "GMAIL_CLIENT_ID" $DotEnvValues) "OAuth client ID (Google Auth Platform > Clients, type Desktop app)"
+    $ClientSecretName = "gmail-client-secret"
+    $storeClientSecret = -not (Test-GcloudSecret $ClientSecretName)
+    if ($storeClientSecret) {
+        $clientSecret = Read-HiddenValue "OAuth client secret of that client"
+        if ([string]::IsNullOrEmpty($clientSecret)) {
+            throw "The OAuth client secret is required."
+        }
+    }
+    else {
+        $clientSecret = Get-GcloudSecretValue $ClientSecretName
+    }
+
+    # The API the service and the check below call; nothing happens if it is on.
+    Invoke-Gcloud @("services", "enable", "gmail.googleapis.com", "--project=$ProjectId")
+    $token = Get-GmailToken $ClientId $clientSecret $Email
+    $gmailProfile = Invoke-RestMethod -Uri "https://gmail.googleapis.com/gmail/v1/users/me/profile" `
+        -Headers @{ Authorization = "Bearer $($token.access_token)" }
+    if (-not [string]::IsNullOrWhiteSpace($Email) -and $gmailProfile.emailAddress -ne $Email) {
+        throw "Logged in as $($gmailProfile.emailAddress), not $Email; run again and choose that account."
+    }
+    $Email = $gmailProfile.emailAddress
+    Write-Host "Logged in as $Email."
+
+    # Stored only after a working login, so a mistyped client secret is never kept.
+    if ($storeClientSecret) {
+        Set-GcloudSecret $ClientSecretName $clientSecret
+    }
+    $SecretName = "gmail-$AccountId-refresh-token"
+    Set-GcloudSecret $SecretName $token.refresh_token
+
+    $YamlEmail = ConvertTo-YamlString $Email
+    $YamlClientId = ConvertTo-YamlString $ClientId
+    $Entry = @"
+  - id: $YamlId
+    provider: gmail
+    email: $YamlEmail
+    folder_list: $YamlFolderList
+    mailbox:
+      inbox: INBOX
+      folder_root: ''
+      trash: TRASH
+    gmail:
+      client_id: $YamlClientId
+      client_secret_secret: $ClientSecretName
+      refresh_token_secret: $SecretName
+"@
+    $EntryHint = "the folder list's folders become Gmail labels"
+}
+
+Write-Host ""
+Write-Host "Add this entry under 'accounts:' in the service's config ($EntryHint):"
+Write-Host ""
+Write-Host $Entry
 Write-Host ""
 Write-Host "Download the config, add the entry, and upload it again:"
 Write-Host "  gcloud storage cp `"$GcsUri`" `"$LocalCopy`""

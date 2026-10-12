@@ -56,7 +56,7 @@ folder_lists:
 # of stored mails and keeps its previous config (at startup: this file).
 accounts:
   - id: primary
-    provider: imap            # imap | gmail | exchange (gmail and exchange: not yet supported)
+    provider: imap            # imap | gmail | exchange (exchange: not yet supported)
     email: ${IMAP_USER}
     user_first_name: ${USER_FIRST_NAME:-there}
     folder_list: default
@@ -76,14 +76,15 @@ accounts:
   # More IMAP accounts: scripts/add_account.ps1 stores the password as the
   # secret imap-<id>-password and prints the entry to add to the GCS copy.
 
-  # Gmail (OAuth2 client of a Google Cloud project, refresh token per mailbox):
+  # Gmail (OAuth client of type Desktop app, refresh token per mailbox; created
+  # by scripts/add_account.ps1 -Provider gmail). Folders are labels:
   # - id: gmail-example
   #   provider: gmail
   #   email: someone@gmail.com
-  #   folder_list: default
-  #   mailbox: {inbox: INBOX, folder_root: smio, trash: "[Gmail]/Trash"}
+  #   folder_list: logistics
+  #   mailbox: {inbox: INBOX, folder_root: '', trash: TRASH}
   #   gmail:
-  #     client_id: ${GMAIL_CLIENT_ID}
+  #     client_id: 1234-abc.apps.googleusercontent.com
   #     client_secret_secret: gmail-client-secret
   #     refresh_token_secret: gmail-example-refresh-token
 

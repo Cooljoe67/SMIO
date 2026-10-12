@@ -281,6 +281,27 @@ account's address if it differs from the username, `-FolderList` its folder list
 and `-GcsBucket` overrides `GCS_BUCKET` from `.env`. Run it again with the same id
 to change a password.
 
+A Gmail account needs a Google login instead of a password:
+
+```powershell
+.\scripts\add_account.ps1 -Provider gmail -AccountId gmail-me -FolderList logistics
+```
+
+Once per project, in the Google Cloud console's Google Auth Platform: set up the
+app (Audience "External", then "Publish app" so it is "In production"; in
+"Testing" a login expires after 7 days), add the scope
+`https://www.googleapis.com/auth/gmail.modify` under Data Access, and create a
+client of type "Desktop app" under Clients. The scope may stay unverified for
+personal use; Google then warns at the login ("Advanced", then "Go to ... (unsafe)").
+
+The script asks for the client ID (or reads `GMAIL_CLIENT_ID`) and, the first time,
+the client secret, enables the Gmail API, opens the browser for the login, checks
+that the mailbox is `-Email` if given, and stores the client secret as
+`gmail-client-secret` and the refresh token as `gmail-<id>-refresh-token`. Run it
+again after revoking SMIO's access or changing the Google password. The folder
+list's folders become Gmail labels (created on first use); a complete read imports
+inbox mail of the last `SMIO_GMAIL_IMPORT_DAYS` (default 30) days only.
+
 ### Email commands
 
 Reply to a daily summary or use the subject `SMIO Command`, with one command on
@@ -436,8 +457,8 @@ credential itself, and adding an account means one new secret and a config edit
 instead of a new Cloud Run binding and a redeploy. Set exactly one of a field and
 its `*_secret` variant. Secrets are cached for the life of the instance; after a
 failed login SMIO reads the password secret again and retries once, so rotating a
-password only needs a new secret version. Gmail and Exchange are not supported yet;
-their secret fields only exist in the schema.
+password only needs a new secret version (or, for Gmail, a new refresh token).
+Exchange is not supported yet; its secret fields only exist in the schema.
 
 The deploy script grants the runtime service account `Secret Manager Secret
 Accessor` on the project, which covers secrets added later. SMIO finds the project
