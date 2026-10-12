@@ -7,6 +7,7 @@ from imap_tools import MailboxLoginError
 
 from src import config
 from src.api.utils import imap_client
+from src.mail import imap as mail_imap
 from src.storage import secret_store
 
 
@@ -124,7 +125,7 @@ class FakeServer:
 
 def test_mailbox_logs_in_with_the_secret(monkeypatch):
     server = FakeServer("secret")
-    monkeypatch.setattr(imap_client, "MailBox", server)
+    monkeypatch.setattr(mail_imap, "MailBox", server)
     account = config.parse_config(IMAP_WITH_SECRET).accounts[0]
 
     assert imap_client.open_mailbox(account) is server
@@ -132,7 +133,7 @@ def test_mailbox_logs_in_with_the_secret(monkeypatch):
 
 
 def test_empty_plain_password_is_refused(monkeypatch):
-    monkeypatch.setattr(imap_client, "MailBox", lambda host: pytest.fail("connected"))
+    monkeypatch.setattr(mail_imap, "MailBox", lambda host: pytest.fail("connected"))
     account = config.parse_config(
         _account("imap", "host: imap.test, username: owner@test, password: ''")
     ).accounts[0]
@@ -146,7 +147,7 @@ def test_rotated_password_is_read_again_after_a_failed_login(secret_manager, mon
     secret_store._cache["imap-password"] = "old"
     values["imap-password"] = "new"
     server = FakeServer("new")
-    monkeypatch.setattr(imap_client, "MailBox", server)
+    monkeypatch.setattr(mail_imap, "MailBox", server)
     account = config.parse_config(IMAP_WITH_SECRET).accounts[0]
 
     assert imap_client.open_mailbox(account) is server
@@ -158,7 +159,7 @@ def test_wrong_password_is_not_retried_when_the_secret_is_unchanged(secret_manag
     values, accessed = secret_manager
     values["imap-password"] = "wrong"
     server = FakeServer("right")
-    monkeypatch.setattr(imap_client, "MailBox", server)
+    monkeypatch.setattr(mail_imap, "MailBox", server)
     account = config.parse_config(IMAP_WITH_SECRET).accounts[0]
 
     with pytest.raises(MailboxLoginError):

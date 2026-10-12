@@ -4,6 +4,7 @@ import pytest
 
 from src import config
 from src.api.utils import command_processor
+from src.mail.imap import ImapMailbox
 
 # Both accounts share the default model, so only the account decides.
 SHARED_MODEL = """
@@ -103,10 +104,13 @@ class FakeMailBox:
     def __exit__(self, *exc):
         return False
 
-    def fetch(self, mark_seen=False):
+    def fetch(self, criteria="ALL", mark_seen=False):
         return iter(self.messages)
 
     def move(self, uids, destination):
+        pass
+
+    def logout(self):
         pass
 
 
@@ -116,10 +120,15 @@ def test_command_mails_pass_on_whether_the_account_is_primary(
 ):
     account = accounts[account_index]
     message = SimpleNamespace(
-        uid="5", from_=account.email, subject="SMIO Command", text="restore model"
+        uid="5", from_=account.email, subject="SMIO Command", text="restore model",
+        html="", date=None,
     )
     notices = []
-    monkeypatch.setattr(command_processor, "open_mailbox", lambda account: FakeMailBox([message]))
+    monkeypatch.setattr(
+        command_processor,
+        "open_mailbox",
+        lambda account: ImapMailbox(account, connection=FakeMailBox([message])),
+    )
     monkeypatch.setattr(command_processor, "SessionLocal", lambda: db)
     monkeypatch.setattr(command_processor, "_load_command_attempts", lambda: [])
     monkeypatch.setattr(command_processor, "_save_command_attempt", lambda attempt_id, attempt: None)

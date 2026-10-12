@@ -10,6 +10,7 @@ from sqlalchemy import create_engine, text
 
 from src import config
 from src.api.utils import imap_client
+from src.mail import imap as mail_imap
 from src.db import database
 from src.scheduler import workflows
 from src.storage import gcs
@@ -173,7 +174,7 @@ def test_unavailable_primary_account_stays_the_primary_one():
 
 def test_unavailable_account_is_refused_before_connecting(monkeypatch):
     account = config.parse_config(TWO_ACCOUNTS).account("second")
-    monkeypatch.setattr(imap_client, "MailBox", lambda host: pytest.fail("connected"))
+    monkeypatch.setattr(mail_imap, "MailBox", lambda host: pytest.fail("connected"))
 
     with pytest.raises(RuntimeError, match="'second' is unavailable: environment variable"):
         imap_client.open_mailbox(account)
@@ -184,7 +185,7 @@ def test_five_minute_workflow_reports_the_unavailable_account(monkeypatch):
     monkeypatch.setattr(workflows, "reload_config", lambda **kwargs: None)
     monkeypatch.setattr(workflows, "persist_database", lambda: False)
     monkeypatch.setattr(
-        imap_client, "MailBox", lambda host: SimpleNamespace(login=lambda user, password: host)
+        mail_imap, "MailBox", lambda host: SimpleNamespace(login=lambda user, password: host)
     )
 
     def fetch_inbox(account):

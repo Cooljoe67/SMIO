@@ -7,9 +7,9 @@ from email.mime.text import MIMEText
 from email.utils import formataddr, formatdate, make_msgid
 
 from src.config import primary_account
+from src.mail import open_mailbox
 
 from .folder_rules import inbox_folder
-from .imap_client import open_mailbox
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +56,7 @@ def append_summary_to_inbox(
 
     try:
         with open_mailbox(account) as mailbox:
-            mailbox.append(message.as_bytes(), folder=inbox_folder(account))
+            mailbox.append(message.as_bytes(), inbox_folder(account))
         logger.info("Daily summary appended to %s", account.email)
         return True
     except Exception:

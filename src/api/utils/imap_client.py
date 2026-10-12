@@ -3,10 +3,10 @@ import os
 import re
 from datetime import date, datetime, timedelta, timezone
 
-from imap_tools import AND, H, MailBox, MailboxLoginError
+from imap_tools import AND, H
 from src.db.database import SessionLocal
 from src.db.models import Email
-from src.storage import secret_store
+from src.mail.imap import connect as open_mailbox
 
 from .mail_identity import fingerprint, is_same_mail, normalized_date
 from .folder_rules import (
@@ -22,34 +22,6 @@ logger = logging.getLogger(__name__)
 
 # Sent mails are only needed to recognise replies, so only recent ones are read.
 SENT_SYNC_DAYS = int(os.getenv("SMIO_SENT_SYNC_DAYS", "30"))
-
-
-def open_mailbox(account):
-    """Log in to an account's mailbox; use as a context manager."""
-    if account.unavailable:
-        raise RuntimeError(f"Account {account.id!r} is unavailable: {account.unavailable}")
-    if account.provider != "imap":
-        raise NotImplementedError(
-            f"Account {account.id!r}: provider {account.provider!r} is not supported yet"
-        )
-    imap = account.imap
-    if imap.password_secret is None:
-        if not imap.password:
-            raise RuntimeError(
-                f"Account {account.id!r}: no IMAP password; set the variable its config refers to"
-            )
-        return MailBox(imap.host).login(imap.username, imap.password)
-
-    password = secret_store.read_secret(imap.password_secret)
-    try:
-        return MailBox(imap.host).login(imap.username, password)
-    except MailboxLoginError:
-        # The password may have been rotated since it was cached.
-        secret_store.invalidate(imap.password_secret)
-        current = secret_store.read_secret(imap.password_secret)
-        if current == password:
-            raise
-        return MailBox(imap.host).login(imap.username, current)
 
 
 def _header(message, name):

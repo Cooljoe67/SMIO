@@ -24,8 +24,9 @@ from src.ai.retrain import restore_previous_model, retrain_if_due
 from src.db.database import SessionLocal
 from src.storage import gcs
 
-from .folder_rules import inbox_folder, trash_folder
-from .imap_client import open_mailbox
+from src.mail import open_mailbox
+
+from .folder_rules import inbox_folder
 from .inbox_processor import MAX_UNDO_BATCHES, undo_processing_batches
 from .mailer import append_summary_to_inbox
 
@@ -165,13 +166,6 @@ def _recent_cloud_run_logs(line_count):
     return "\n".join(lines) or "No Cloud Run API log entries were found."
 
 
-def _delete_message(mailbox, uid, account):
-    trash = trash_folder(account)
-    if not mailbox.folder.exists(trash):
-        mailbox.folder.create(trash)
-    mailbox.move([uid], trash)
-
-
 def _command_failed(result):
     return bool(
         result.get("error")
@@ -309,16 +303,14 @@ def process_instruction_mails(account, is_primary=False):
     owner = (account.email or "").strip().lower()
 
     with open_mailbox(account) as mailbox:
-        mailbox.folder.set(inbox_folder(account), readonly=False)
-
-        # Collect matches first: mutating folders while a fetch() generator is open is unsafe.
+        inbox = inbox_folder(account)
         matches = []
-        for msg in mailbox.fetch(mark_seen=False):
-            if (msg.from_ or "").strip().lower() != owner:
+        for msg in mailbox.read_folder(inbox).messages:
+            if (msg.sender or "").strip().lower() != owner:
                 continue
             command = _normalize_command(msg.subject, msg.text)
             if command is not None:
-                matches.append((msg.uid, command))
+                matches.append((msg.ref, command))
 
         db = SessionLocal()
         try:
@@ -334,7 +326,7 @@ def process_instruction_mails(account, is_primary=False):
                 }
                 try:
                     _save_command_attempt(attempt_id, attempt)
-                    _delete_message(mailbox, uid, account)
+                    mailbox.trash(inbox, [uid])
                 except Exception as error:
                     errors.append({"command": command, "error": str(error)})
                     logger.exception("Could not prepare instruction command %s", command)
