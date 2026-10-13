@@ -8,6 +8,7 @@ from src.db.database import (
     backfill_fingerprints,
     backfill_retrain_runs,
     engine,
+    ensure_action_claims_per_mail,
     ensure_email_columns,
     requeue_own_address_mails,
     ensure_summary_snapshot_columns,
@@ -19,6 +20,7 @@ logging.basicConfig(level=logging.INFO)
 
 Base.metadata.create_all(bind=engine)
 ensure_email_columns()
+ensure_action_claims_per_mail()
 ensure_summary_snapshot_columns()
 backfill_retrain_runs()
 backfill_fingerprints()

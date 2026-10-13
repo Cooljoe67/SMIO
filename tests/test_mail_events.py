@@ -181,6 +181,32 @@ def test_an_interrupted_action_is_never_started_again(db, actions):
     assert db.get(MailEvent, event.id).dispatched_at is not None
 
 
+def test_a_retry_never_repeats_an_action_another_event_of_the_mail_completed(db, actions):
+    calls = []
+
+    def draft(db, event):
+        calls.append(event.id)
+        if len(calls) == 1:
+            raise RuntimeError("overloaded")
+
+    events.action("draft", applies=lambda db, e: True)(draft)
+    first = _stored_event(db, "received")
+    second = events.record(
+        db, primary_account(), db.get(Email, first.email_id), "moved",
+        from_folder="INBOX", to_folder="INBOX/delivery", source="system",
+    )
+    db.commit()
+
+    events.dispatch(db)  # the first event fails; the second waits for the next call
+    events.dispatch(db)  # the retry succeeds
+    events.dispatch(db)
+
+    assert calls == [first.id, first.id]
+    run = db.query(MailEventAction).one()
+    assert (run.status, run.event_id) == ("done", first.id)
+    assert db.get(MailEvent, second.id).dispatched_at is not None
+
+
 def test_events_have_a_provider_neutral_format(db):
     event = _stored_event(db)
 

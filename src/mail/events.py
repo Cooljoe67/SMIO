@@ -165,37 +165,32 @@ def action(name, applies):
 
 
 def _run_once(db, event, name, run):
-    """Run an action for an event unless it ran, runs, or failed for good, or
-    ran for an earlier event of the same mail; returns its status."""
+    """Run an action for an event unless it ran or runs for this mail, or failed
+    for good; returns its status ("skipped" when another event of the mail ran it)."""
     run_row = (
         db.query(MailEventAction)
-        .filter(MailEventAction.event_id == event.id, MailEventAction.action == name)
+        .filter(MailEventAction.email_id == event.email_id, MailEventAction.action == name)
         .first()
     )
-    if run_row is None and (
-        db.query(MailEventAction.id)
-        .filter(
-            MailEventAction.email_id == event.email_id,
-            MailEventAction.action == name,
-            MailEventAction.status.in_(("done", "running")),
-        )
-        .first()
-        is not None
-    ):
-        return "skipped"
-    if run_row is not None and (
-        run_row.status in ("done", "running") or run_row.attempts >= MAX_ATTEMPTS
-    ):
-        if run_row.status == "running":
-            logger.warning(
-                "Action %s for event %s was interrupted and is not repeated", name, event.event_key
-            )
-        return run_row.status
-    if run_row is None:
-        run_row = MailEventAction(
-            event_id=event.id, email_id=event.email_id, action=name, attempts=0
-        )
+    if run_row is not None:
+        if run_row.status in ("done", "running") and run_row.event_id != event.id:
+            return "skipped"
+        if run_row.status in ("done", "running") or (
+            run_row.event_id == event.id and run_row.attempts >= MAX_ATTEMPTS
+        ):
+            if run_row.status == "running":
+                logger.warning(
+                    "Action %s for event %s was interrupted and is not repeated",
+                    name, event.event_key,
+                )
+            return run_row.status
+        if run_row.event_id != event.id:
+            # A failure of an earlier event: the new event gets its own attempts.
+            run_row.attempts = 0
+    else:
+        run_row = MailEventAction(email_id=event.email_id, action=name, attempts=0)
         db.add(run_row)
+    run_row.event_id = event.id
     run_row.status = "running"
     run_row.attempts += 1
     run_row.updated_at = _utcnow()
@@ -229,12 +224,18 @@ def dispatch(db, account=None):
     # Rules are read from the config on every call, so edits apply on the next run.
     actions = {**_ACTIONS, **rules.configured_actions()}
     counts = {"events": 0, "done": 0, "skipped": 0, "failed": 0}
+    # One attempt per mail and action and call, even if several of its events apply.
+    attempted = set()
     for event in query.order_by(MailEvent.id).all():
         counts["events"] += 1
         settled = True
         for name, (applies, run) in actions.items():
             if not applies(db, event):
                 continue
+            if (event.email_id, name) in attempted:
+                settled = False
+                continue
+            attempted.add((event.email_id, name))
             status = _run_once(db, event, name, run)
             if status in ("done", "skipped"):
                 counts[status] += 1
@@ -242,7 +243,9 @@ def dispatch(db, account=None):
                 counts["failed"] += 1
                 attempts = (
                     db.query(MailEventAction.attempts)
-                    .filter(MailEventAction.event_id == event.id, MailEventAction.action == name)
+                    .filter(
+                        MailEventAction.email_id == event.email_id, MailEventAction.action == name
+                    )
                     .scalar()
                 )
                 settled = settled and attempts >= MAX_ATTEMPTS

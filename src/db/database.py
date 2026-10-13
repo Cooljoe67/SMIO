@@ -284,6 +284,44 @@ def requeue_own_address_mails():
         db.close()
 
 
+def ensure_action_claims_per_mail():
+    """Rebuild mail_event_actions with one claim per mail and action (it had one
+    per event); keeps the strongest claim of each pair. Safe to repeat."""
+    from src.db.models import MailEventAction
+
+    if "mail_event_actions" not in inspect(engine).get_table_names():
+        return False
+    unique = [
+        sorted(constraint["column_names"])
+        for constraint in inspect(engine).get_unique_constraints("mail_event_actions")
+    ]
+    if ["action", "email_id"] in unique:
+        return False
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE mail_event_actions RENAME TO mail_event_actions_old"))
+        # The indexes keep their names when the table is renamed; free them.
+        for (index,) in connection.execute(text(
+            "SELECT name FROM sqlite_master WHERE type = 'index'"
+            " AND tbl_name = 'mail_event_actions_old' AND sql IS NOT NULL"
+        )).all():
+            connection.execute(text(f'DROP INDEX "{index}"'))
+        MailEventAction.__table__.create(bind=connection)
+        connection.execute(text("""
+            INSERT INTO mail_event_actions
+                (id, event_id, email_id, action, status, attempts, error, updated_at)
+            SELECT id, event_id, email_id, action, status, attempts, error, updated_at FROM (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY email_id, action
+                    ORDER BY CASE status WHEN 'done' THEN 0 WHEN 'running' THEN 1 ELSE 2 END,
+                             updated_at DESC, id DESC
+                ) AS rank
+                FROM mail_event_actions_old
+            ) WHERE rank = 1
+        """))
+        connection.execute(text("DROP TABLE mail_event_actions_old"))
+    return True
+
+
 def ensure_summary_snapshot_columns():
     required_columns = {
         "total_entries": "INTEGER",

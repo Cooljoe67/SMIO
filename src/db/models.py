@@ -174,15 +174,15 @@ class MailEvent(Base):
 
 
 class MailEventAction(Base):
-    """One action's run for one event; at most one row per pair, so an action
-    never runs twice for the same event."""
+    """An action's claim on a mail; one row per pair, so an action runs at most
+    once per mail, whichever of its events triggers it."""
 
     __tablename__ = "mail_event_actions"
-    __table_args__ = (UniqueConstraint("event_id", "action"),)
+    __table_args__ = (UniqueConstraint("email_id", "action"),)
 
     id = Column(Integer, primary_key=True)
+    # The event that last started the action.
     event_id = Column(Integer, nullable=False, index=True)
-    # An action runs at most once per mail, whichever of its events triggers it.
     email_id = Column(Integer, nullable=False, index=True)
     action = Column(String, nullable=False)
     # running (claimed; stays so if the process died during the action), done, failed.
