@@ -2,15 +2,18 @@
 
 An AI-powered system that automatically analyzes, categorizes, and declutters your email inbox.
 
-SMIO connects to your mailbox via IMAP, classifies incoming mails with a fine-tuned DistilBERT model, extracts delivery-related details (tracking numbers, carriers, dates) with a custom NER model, moves mails into category folders according to configurable rules, sends you a daily plain-language summary, and periodically retrains the classifier on your manual corrections to improve its F1 score over time.
+SMIO connects to one or more mailboxes (IMAP or Gmail), classifies incoming mails with a fine-tuned DistilBERT model, moves them into the folders of a configurable folder list, extracts delivery details with a custom NER model, reacts to mail events with configurable action rules (for example, a reply draft written by Claude Haiku), sends you a daily plain-language summary, and retrains the classifier on your manual corrections.
 
 ---
 
 ## 📌 Features
 
-- **AI-based email classification** — categorizes mail as `delivery`, `commercial`, `social`, `tech`, or `other` with a fine-tuned DistilBERT model.
-- **Delivery extraction** — identifies tracking and order details with a token-classification NER model and rule-based fallbacks.
-- **Inbox automation** — files messages by category, applies read/unread retention rules, records manual folder moves as corrections, and supports undo.
+- **AI-based email classification** — sorts mail into the folders of a configurable [folder list](#folder-lists), one fine-tuned DistilBERT model per list; mail that fits no folder stays in the inbox as `other`.
+- **Several accounts and providers** — IMAP and Gmail behind one [mailbox interface](#-how-it-works); each account uses one folder list. Exchange is planned.
+- **Delivery extraction** — for lists with a `delivery` folder, identifies tracking and order details with a token-classification NER model and rule-based fallbacks.
+- **Inbox automation** — files messages by folder, applies read/unread retention rules, records manual folder moves as corrections, and supports undo.
+- **Events and action rules** — every change of a mail (received, moved by you or by SMIO, removed, read) becomes an event; [action rules](#action-rules) react to them, for example with a reply draft written by Claude Haiku. Each action runs at most once per mail.
+- **Reply status** — Claude Haiku reads replies in a thread and updates the status of the mail they answer (to do, waiting for an answer, a date or a document, done).
 - **Email commands** — accepts `UNDO [n]`, `RETRAIN`, `RELOAD MODEL`, `RESTORE MODEL`, `LOGS <1-2000>`, and `SUMMARY` from the configured mailbox; commands are moved to Trash before execution, with failure notices for errors and timed-out attempts.
 - **Daily summaries** — stores logical-day snapshots, delivery details, and retraining status. Display dates use `DD/MM/YYYY`; seed training data is excluded from mailbox counts.
 - **Replay-buffer retraining** — learns from manual corrections mixed with earlier labeled mail, discards rejected candidates, and promotes only when macro-F1 is no worse, the paired-bootstrap 95% lower bound is within a 2-point non-inferiority margin, and no class with at least 10 holdout examples loses more than 10 points of recall. Replaced models are archived in GCS for seven days and can be restored by email command.
@@ -20,8 +23,72 @@ SMIO connects to your mailbox via IMAP, classifies incoming mails with a fine-tu
 
 - Python 3.x, PyTorch, Hugging Face Transformers, scikit-learn
 - FastAPI and SQLAlchemy with SQLite
-- `imap-tools` for IMAP access
-- Google Cloud Run, Cloud Scheduler, and Cloud Storage (optional)
+- `imap-tools` for IMAP, the Gmail API (REST with `google-auth`) for Gmail
+- Anthropic Claude Haiku for reply status and reply drafts (optional)
+- Google Cloud Run, Cloud Scheduler, Cloud Storage and Secret Manager (optional)
+
+## 📬 How it works
+
+### The mail layer
+
+Providers differ only in a thin adapter. Everything above it, from change
+detection to actions, is shared, so a new provider (such as Exchange) only needs
+an adapter.
+
+```mermaid
+flowchart LR
+    IMAPS[(IMAP server)] <--> IA[IMAP adapter<br/>mail/imap.py]
+    GMS[(Gmail API)] <--> GA[Gmail adapter<br/>mail/gmail.py]
+    IA & GA --- MB{{Mailbox interface<br/>mail/base.py}}
+    MB -->|read: complete, or changes since a cursor| SY[Change detector<br/>mail/sync.py]
+    SY -->|mails, cursors| DB[(SQLite)]
+    SY -->|received, moved, removed, read| EV[Events<br/>mail/events.py]
+    EV -->|your moves| CO[Corrections<br/>for retraining]
+    EV -->|outbox, once per mail| AR[Action rules<br/>mail/rules.py]
+    AR -->|create_draft| MB
+    CM[Commands: sort, undo, retention<br/>mail/commands.py] -->|move, trash| MB
+    CM -->|system events| EV
+```
+
+- **Adapters** only translate. They read folders (Gmail: labels) and run commands
+  (move, trash, append, create a draft). Gmail lists only message ids; content is
+  fetched for mail SMIO has not stored yet, at most `SMIO_SYNC_MAX_FETCHES` per run.
+- **The change detector** compares what it reads with the database. It reads each
+  folder completely every `SMIO_FULL_SYNC_MINUTES`, otherwise only what arrived
+  since the folder's cursor (IMAP: UIDNEXT; Gmail: the history id). Only a complete
+  read can tell that a mail left a folder or was read.
+- **Events** record every change in the same transaction as the change itself,
+  with `source: user` (found on the server) or `system` (done by SMIO). SMIO's own
+  commands write their change at once, so the server's echo is no new event. Your
+  moves into a folder of the list are corrections for the next retraining.
+- **Actions** run from the event outbox after the change is saved, at most once
+  per mail and rule. Mail found by an account's first sync triggers none.
+- **SMIO's own mails** (summaries, notices) carry the header `X-SMIO-Mail` and are
+  never classified; mail from the account's own address otherwise is.
+
+### The workflow
+
+```mermaid
+flowchart TD
+    F([Every 5 minutes]) --> A[For each account]
+    A --> S[Sync folders, record events]
+    S --> C[Run command mails<br/>UNDO, RETRAIN, ...]
+    C --> P[Classify new inbox mail<br/>and sort it into folders]
+    P --> R[Reply status: Haiku rates new replies]
+    R --> X[Run action rules on new events]
+    X -->|next account| A
+    X -->|all accounts done| G[(Save the database to GCS)]
+    D([Daily]) --> D1[Gather the summary] --> D2[Append it to the inbox] --> D3[Retrain if enough corrections]
+```
+
+1. **Sync** — each account's watched folders are read and reconciled, and retention moves old mail to the trash ([src/mail/sync.py](src/mail/sync.py), [src/mail/commands.py](src/mail/commands.py)).
+2. **Commands** — mails with a command are moved to the trash, then run ([src/api/utils/command_processor.py](src/api/utils/command_processor.py)).
+3. **Process** — new inbox mail is classified with the model of the account's folder list, NER runs for `delivery` mails, and the mail is moved into its folder ([src/api/utils/inbox_processor.py](src/api/utils/inbox_processor.py)).
+4. **Reply status** — Claude Haiku decides what a reply means for the mail it answers ([src/ai/reply_status.py](src/ai/reply_status.py)).
+5. **Actions** — configured rules run on the new events ([src/mail/rules.py](src/mail/rules.py)).
+6. **Summarize and retrain (daily)** — the logical day's snapshot is stored and its digest appended to the inbox. The model section and technical details appear only after a retraining ran in that period. Retraining starts once enough manual corrections have accumulated: it fine-tunes the classifier on a replay buffer (90% old data / 10% new corrections per class) and applies the macro-F1, paired-bootstrap and per-class recall gates on a fixed hold-out set, then mails the result. Automatic retraining covers the `default` list's model; models of other lists are trained with `scripts/train_distilbert_optuna.py --folder-list <list>` and uploaded to `models/classifier-<list>` in GCS.
+
+---
 
 ## 📂 Project structure
 
@@ -55,7 +122,8 @@ SMIO/
     train_distilbert_optuna.py
     train_ner.py
   models/
-    distilbert_deployed/
+    distilbert_deployed/       # model of the "default" folder list
+    classifier-<list>/         # model of any other folder list
     distilbert_optuna/
     distilbert_candidate_*/
     ner-smio/
@@ -172,7 +240,7 @@ The API exposes these scheduler/action endpoints:
 
 | Method | Path | Schedule | Work |
 |---|---|---|---|
-| POST | `/jobs/five-minute` | Every 5 minutes | Fetch, process instruction mails, classify and file new mail |
+| POST | `/jobs/five-minute` | Every 5 minutes | Per account: sync, command mails, classify and file new mail, reply status, action rules |
 | POST | `/jobs/daily` | Daily | Gather, send, then retrain |
 | POST | `/jobs/daily/gather` | Manual | Gather and store one summary date (`force=true` can overwrite an older snapshot) |
 | POST | `/jobs/daily/send` | Manual | Send the stored summary for one date |
@@ -258,7 +326,7 @@ Add `-UpdateNerModel` to upload `models/ner-smio` as a new immutable GCS release
 and deploy a Cloud Run revision pinned to it. Use `-NerModelDirectory` to choose a
 different trained model directory.
 
-Daily summaries are appended directly to the configured IMAP inbox. The deploy
+Daily summaries are appended directly to the account's inbox. The deploy
 script reads `GCP_PROJECT_ID`, `GCP_REGION`, and `GCS_BUCKET` from `.env`;
 `GCP_SCHEDULER_LOCATION` is optional and defaults to `GCP_REGION`. Explicit
 script parameters override `.env` values.
@@ -414,7 +482,19 @@ GCS_CONFIG_OBJECT=config/smio.yaml
 SMIO_COMMAND_TIMEOUT_MINUTES=15
 ```
 
-Folder lists (one classifier model per list), per-folder on/off switches, retention and mail accounts are configured in [config/smio.yaml](config/smio.yaml).
+`ANTHROPIC_API_KEY` (Secret Manager: `claude-api-key`) enables reply status and
+reply drafts; without it, replies wait and draft actions fail. Optional tuning:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `SMIO_FULL_SYNC_MINUTES` | 60 | Minutes between complete reads of a folder; in between, only changes are read |
+| `SMIO_SENT_SYNC_DAYS` | 30 | Days of sent mail read to recognise replies |
+| `SMIO_SYNC_MAX_FETCHES` | 500 | Mails whose content Gmail fetches per account and run |
+| `SMIO_GMAIL_IMPORT_DAYS` | 30 | Days of existing Gmail inbox mail imported by the first sync |
+| `SMIO_MIN_CORRECTIONS` | 20 | Corrections that make a retraining due |
+| `SMIO_STATUS_MODEL`, `SMIO_DRAFT_MODEL` | `claude-haiku-4-5` | Claude models for reply status and drafts |
+
+Folder lists (one classifier model per list), per-folder on/off switches, retention, mail accounts and action rules are configured in [config/smio.yaml](config/smio.yaml).
 The deployed service reads its copy from GCS (`GCS_CONFIG_OBJECT`) into memory at
 the start of every workflow run, so edits there apply without a redeploy; it uploads
 the bundled file only if the object does not exist. Scripts and local runs always
@@ -484,12 +564,64 @@ GCS continues to store the deployed classifier model.
 
 ---
 
-## 📬 How it works
+### Folder lists
 
-1. **Sync & fetch** — reconcile known messages across IMAP folders, fetch new INBOX mails ([src/mail/sync.py](src/mail/sync.py)).
-2. **Process** — classify each new mail, run NER for `delivery` mails, move it into its category folder, apply retention-based cleanup ([src/api/utils/inbox_processor.py](src/api/utils/inbox_processor.py)).
-3. **Summarize** — gather and persist a logical-day snapshot, then append its plain-language digest to the IMAP inbox.
-4. **Retrain (if due)** — once enough manual corrections have accumulated, fine-tune the classifier using a replay buffer (90% old data / 10% new corrections per class) and apply the macro-F1, paired-bootstrap, and per-class recall promotion gates on a fixed hold-out set. After a completed run, SMIO emails the baseline and candidate metrics, confidence interval, per-class recall, training duration, and promotion outcome.
+A folder list names the folders a model sorts into; its keys are the model's
+labels, plus the implicit `other`, which stays in the inbox. Each account uses one
+list, and each list has its own model, so adding or removing a folder means a new
+list and a new model. The lists in [config/smio.yaml](config/smio.yaml) are
+examples, for instance:
+
+```yaml
+folder_lists:
+  default:                       # model: models/distilbert_deployed
+    delivery: {retention_days_unread: 20}
+    tech: {retention_days: 1}
+  logistics:                     # model: models/classifier-logistics
+    dringend: {folder: "1: Dringend"}
+    zu_beantworten: {folder: "2: Zu beantworten"}
+    antwort_ausstehend: {folder: "5: Antwort ausstehend", manual: true}
+```
+
+- `folder` — the folder (Gmail: label) name below the account's `folder_root`; defaults to the key.
+- `enabled: false` — keeps the label, but its mails stay in the inbox.
+- `retention_days`, `retention_days_unread` — move read or unread mail older than that to the trash.
+- `manual: true` — a folder you file into by hand only: watched for moves (and action rules), never predicted and not a model label.
+
+### Action rules
+
+Rules are defined per folder list and apply to every account using it. An
+account's own `actions:` replaces a list rule of the same name, switches it off
+with `{enabled: false}`, or adds rules:
+
+```yaml
+actions:
+  logistics:                     # for every account on the logistics list
+    draft:
+      when:
+        - {event: moved, to: zu_beantworten}
+      do:
+        - create_draft
+
+accounts:
+  - id: gmail-me
+    folder_list: logistics
+    # provider, email, mailbox, gmail: ...
+    actions:
+      draft:                     # replaces the list's rule for this account
+        when: [{event: moved, to: zu_beantworten}]
+        do: [{create_draft: {instructions: "Immer duzen"}}]
+```
+
+A rule runs when any `when` entry matches; all conditions within an entry must
+hold: `event` (`received`, `sent`, `moved`, `removed`, `read`), `source` (`user`
+or `system`; omitted: either), `to` (a folder of the list, moved events only),
+`from` (an address or `@domain`), `subject_contains`, `body_contains`
+(case-insensitive). Steps: `create_draft` writes a reply with Claude Haiku into the
+account's drafts folder, in the mail's thread and language; facts the mail does not
+give become placeholders such as `[Liefertermin]`, and the account's
+`user_first_name` signs it. Planned: `forward`, `ntfy`. The config is checked when
+it loads, so an unknown folder, list or step is rejected.
 
 ---
 
@@ -497,15 +629,15 @@ GCS continues to store the deployed classifier model.
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/mail/fetch` | Sync folders and fetch new INBOX mails |
-| GET | `/mail/sync` | Reconcile known messages across all classification folders |
+| GET | `/mail/fetch?account=<id>` | Sync the account's folders and store new inbox mails |
+| GET | `/mail/sync?account=<id>` | Read every folder completely and reconcile the stored mails |
 | POST | `/inbox/process_unprocessed` | Classify + extract entities + move all unprocessed mails |
 | POST | `/inbox/undo_last_processing?count=n` | Restore the mails of the last `n` processing batches (default 1, max 20) to INBOX |
 | GET | `/summary/daily?summary_date=YYYY-MM-DD` | Return a stored snapshot or generate a preview |
-| POST | `/jobs/five-minute` | Cloud Scheduler: fetch and process new mail |
+| POST | `/jobs/five-minute` | Cloud Scheduler: sync, process and act on new mail for every account |
 | POST | `/jobs/daily` | Cloud Scheduler: gather, append to inbox, and retrain |
 | POST | `/jobs/daily/gather?summary_date=YYYY-MM-DD` | Store one fixed-period summary |
-| POST | `/jobs/daily/send?summary_date=YYYY-MM-DD` | Append a stored summary to the IMAP inbox |
+| POST | `/jobs/daily/send?summary_date=YYYY-MM-DD` | Append a stored summary to the inbox |
 | POST | `/jobs/daily/retrain?summary_date=YYYY-MM-DD` | Run retraining for the current DB state |
 
 ---
@@ -519,12 +651,17 @@ GCS continues to store the deployed classifier model.
 - Daily summary email
 - Persistent summary snapshots with gather/send/retrain job controls
 - Cloud Run deployment script with Artifact Registry and Secret Manager setup
+- Several accounts with their own folder lists and models
+- Mailbox interface with IMAP and Gmail adapters, change cursors and events
+- Action rules with Claude Haiku reply drafts; reply status tracking
 
 **Next**
-- Web dashboard
+- Gmail push notifications (Pub/Sub) instead of polling
+- `forward` and `ntfy` actions
+- Exchange (Microsoft Graph) adapter
 
 **Later**
-- Multi-account support
+- Web dashboard
 - CI/CD pipeline
 
 ---
