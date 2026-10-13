@@ -55,9 +55,7 @@ def _email(db, account, **fields):
     email = Email(
         account=account.id,
         folder_list=account.folder_list,
-        processed=1,
-        processed_at=PROCESSED_AT,
-        **fields,
+        **{"processed": 1, "processed_at": PROCESSED_AT, **fields},
     )
     db.add(email)
     db.commit()
@@ -147,3 +145,32 @@ def test_pending_corrections_count_what_retraining_counts(db, accounts, monkeypa
     assert third_summary["db"]["retrain_due"] is False
     assert "RETRAINING DUE" not in third_summary["message"]
     assert set(third_summary["new_counts"]) == {"delivery", "other"}
+
+
+def test_without_delivery_information_there_is_no_deliveries_section(db, accounts):
+    first, _, _ = accounts
+    _email(db, first, subject="Hallo", classification="delivery")
+
+    summary = daily_summary.build_daily_summary(db, SUMMARY_DATE, account=first)
+
+    assert "Deliveries" not in summary["message"] + summary["html_message"]
+
+
+def test_delivery_information_of_mails_in_any_folder_is_listed(db, accounts):
+    first, _, _ = accounts
+    # New in the period, no date: listed with what Haiku found.
+    _email(db, first, subject="Avis", classification="tech", folder="INBOX/tech",
+           item_name="Kugellager", delivery_company="DB Schenker", tracking_id="SCH1")
+    # Processed long ago, still due: listed by its date.
+    _email(db, first, subject="Old", classification="other", folder="INBOX",
+           item_name="Paletten", delivery_date=DELIVERY_DATE,
+           processed_at=PERIOD_START - timedelta(days=30))
+    _email(db, first, subject="Gone", classification="tech", delivery_date=DELIVERY_DATE,
+           removed_at=PROCESSED_AT)
+
+    summary = daily_summary.build_daily_summary(db, SUMMARY_DATE, account=first)
+
+    assert [item["item"] for item in summary["deliveries"]["upcoming"]] == ["Paletten"]
+    assert [item["item"] for item in summary["deliveries"]["new"]] == ["Kugellager"]
+    assert "- Kugellager (DB Schenker, unknown, SCH1)" in summary["message"]
+    assert "INBOX/tech" in summary["html_message"] and "Gone" not in summary["message"]

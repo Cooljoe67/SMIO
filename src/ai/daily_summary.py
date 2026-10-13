@@ -199,37 +199,75 @@ def _email_command_help_lines():
     ]
 
 
-def _delivery_snapshot(emails, period_start, reference_date):
-    deliveries = [email for email in emails if email.classification == "delivery"]
+# Columns the shipment extraction fills (src/ai/extraction.py); entity_* are
+# left over from the former NER model.
+DELIVERY_FIELDS = (
+    "delivery_status", "delivery_date", "delivery_company", "tracking_id",
+    "order_id", "entity_date", "entity_company",
+)
+
+
+def _has_delivery_info(email):
+    return any(getattr(email, field, None) for field in DELIVERY_FIELDS)
+
+
+def _delivery_item(email, delivery_date):
+    return {
+        "date": delivery_date.isoformat() if delivery_date else None,
+        "item": email.item_name or email.entity_name or email.subject or "Unknown item",
+        "company": email.delivery_company or email.entity_company or "",
+        "status": email.delivery_status or "unknown",
+        "tracking_id": email.tracking_id or email.order_id or "",
+        "folder": email.folder or "",
+    }
+
+
+def _delivery_snapshot(emails, all_emails, reference_date):
+    """Delivery information of mails in any folder: upcoming dates of every kept
+    mail, and what the mails of the summary period reported."""
     today = reference_date
+    new_ids = {email.id for email in emails}
     upcoming = []
+    new = []
     delivered_since_summary = []
     status_counts = {}
-    for email in deliveries:
+    for email in all_emails:
+        if email.removed_at is not None or not _has_delivery_info(email):
+            continue
+        delivery_date = _parse_date(email.delivery_date or email.entity_date)
+        item = _delivery_item(email, delivery_date)
+        if delivery_date and delivery_date >= today:
+            upcoming.append(item)
+        if email.id not in new_ids:
+            continue
         status = (email.delivery_status or "unknown").strip().lower()
         status_counts[status] = status_counts.get(status, 0) + 1
-        delivery_date = _parse_date(email.delivery_date or email.entity_date)
-        if delivery_date and delivery_date >= today:
-            upcoming.append({
-                "date": delivery_date.isoformat(),
-                "item": email.item_name or email.entity_name or email.subject or "Unknown item",
-                "company": email.delivery_company or email.entity_company or "",
-                "status": email.delivery_status or "unknown",
-                "tracking_id": email.tracking_id or "",
-            })
-        if (
-            delivery_date == today
-            and email.processed_at
-            and email.processed_at >= period_start
-        ):
-            delivered_since_summary.append(email.item_name or email.subject or "Unknown item")
+        if status == "delivered":
+            delivered_since_summary.append(item["item"])
+        elif not (delivery_date and delivery_date >= today):
+            new.append(item)
     upcoming.sort(key=lambda item: item["date"])
     return {
         "today_count": sum(item["date"] == today.isoformat() for item in upcoming),
         "upcoming": upcoming[:10],
+        "new": new[:10],
         "delivered_since_summary": delivered_since_summary[:10],
         "status_counts": status_counts,
     }
+
+
+def _has_deliveries(deliveries):
+    return bool(
+        deliveries["upcoming"] or deliveries["new"] or deliveries["delivered_since_summary"]
+    )
+
+
+def _delivery_line(item):
+    details = ", ".join(
+        part for part in (item["company"], item["status"], item["tracking_id"]) if part
+    )
+    date = f"{_format_display_date(item['date'])}: " if item["date"] else ""
+    return f"- {date}{item['item']} ({details})"
 
 
 def _retraining_snapshot(db):
@@ -337,7 +375,7 @@ def build_daily_summary(db, summary_date=None, persist=False, account=None):
     )
     correction_count = len(corrections)
     retraining = _retraining_snapshot(db)
-    deliveries = _delivery_snapshot(emails, period_start, logical_date)
+    deliveries = _delivery_snapshot(emails, all_emails, logical_date)
     # retrain_if_due only retrains the default folder list's model.
     retrain_due = (
         account.folder_list == classifier.DEFAULT_FOLDER_LIST
@@ -376,18 +414,18 @@ def build_daily_summary(db, summary_date=None, persist=False, account=None):
             )
     if not any(new_counts.values()):
         lines.append("- Nothing new since the last summary.")
-    lines.extend(("", "Deliveries"))
-    lines.append(f"- Due today: {deliveries['today_count']}")
-    for item in deliveries["upcoming"][:5]:
-        lines.append(
-            f"- {_format_display_date(item['date'])}: "
-            f"{item['item']} ({item['status']})"
-        )
-    if deliveries["delivered_since_summary"]:
-        lines.append(
-            "- Delivered since last summary: "
-            + ", ".join(deliveries["delivered_since_summary"])
-        )
+    # Only shown when a mail in any folder carries delivery information.
+    if _has_deliveries(deliveries):
+        lines.extend(("", "Deliveries"))
+        if deliveries["upcoming"]:
+            lines.append(f"- Due today: {deliveries['today_count']}")
+        for item in deliveries["upcoming"][:5] + deliveries["new"][:5]:
+            lines.append(_delivery_line(item))
+        if deliveries["delivered_since_summary"]:
+            lines.append(
+                "- Delivered since last summary: "
+                + ", ".join(deliveries["delivered_since_summary"])
+            )
     lines.extend(_model_and_footer_lines(
         retraining, _retrained_during(retraining, period_start, period_end)
     ))
@@ -611,16 +649,40 @@ def _format_html_summary(summary):
             f"<b>{number(count)}</b></td>"
             "</tr>"
         )
+    deliveries = summary["deliveries"]
     delivery_rows = []
-    for item in summary["deliveries"]["upcoming"]:
+    for item in deliveries["upcoming"] + deliveries.get("new", []):
+        date = _format_display_date(item["date"]) if item["date"] else "-"
         delivery_rows.append(
             "<tr>"
-            f"<td>{number(_format_display_date(item['date']))}</td>"
+            f"<td>{number(date)}</td>"
             f"<td>{html.escape(item['item'])}</td>"
             f"<td>{html.escape(item['company'])}</td>"
             f"<td>{html.escape(item['status'])}</td>"
+            f"<td>{html.escape(item.get('tracking_id', ''))}</td>"
+            f"<td>{html.escape(item.get('folder', ''))}</td>"
             "</tr>"
         )
+    # Stored snapshots from before 2026-10-14 lack "new" and may lack this.
+    delivered = deliveries.get("delivered_since_summary", [])
+    delivery_parts = []
+    if deliveries["upcoming"]:
+        delivery_parts.append(f"<p>Due today: <b>{number(deliveries['today_count'])}</b></p>")
+    if delivery_rows:
+        delivery_parts.append(
+            '<table style="width:100%;border-collapse:collapse"><tr>'
+            '<th align="left">Date</th><th align="left">Item</th><th align="left">Company</th>'
+            '<th align="left">Status</th><th align="left">Tracking / order</th>'
+            '<th align="left">Folder</th></tr>' + "".join(delivery_rows) + "</table>"
+        )
+    if delivered:
+        delivery_parts.append(
+            f"<p>Delivered since last summary: {html.escape(', '.join(delivered))}</p>"
+        )
+    # Only shown when a mail in any folder carries delivery information.
+    delivery_section = (
+        "<h2>Deliveries</h2>\n" + "\n".join(delivery_parts) + "\n" if delivery_parts else ""
+    )
     metrics = summary["retraining"]["last_metrics"]
     retrained = _retrained_during(
         summary["retraining"], summary["period_start"], summary["period_end"]
@@ -701,10 +763,7 @@ New version last put in use: {number(_format_run_time(summary['retraining']['las
 <h2>Categories</h2>
 <table style="width:100%;border-collapse:collapse"><tr><th align="left">Category</th><th align="left">New</th><th align="left">Unread</th><th align="left">Removed</th></tr>{''.join(categories)}</table>
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:18px 0;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt">{''.join(bar_rows)}</table>
-<h2>Deliveries</h2>
-<p>Due today: <b>{number(summary['deliveries']['today_count'])}</b></p>
-<table style="width:100%;border-collapse:collapse"><tr><th align="left">Date</th><th align="left">Item</th><th align="left">Company</th><th align="left">Status</th></tr>{''.join(delivery_rows) or '<tr><td colspan="4">No upcoming deliveries found.</td></tr>'}</table>
-{model_section}<h3 style="font-size:15px;color:#173f5f">Email commands</h3>
+{delivery_section}{model_section}<h3 style="font-size:15px;color:#173f5f">Email commands</h3>
 <p>Reply to this summary with one command on the first line.<br></p>
 <ul><li><b>UNDO [n]</b>: restore the mails of the last n processing batches (default 1, max 20) to INBOX.</li>
 <li><b>RETRAIN</b>: force a retraining attempt; an evaluation holdout is required.</li>
