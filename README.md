@@ -63,6 +63,10 @@ flowchart LR
   moves into a folder of the list are corrections for the next retraining.
 - **Actions** run from the event outbox after the change is saved, at most once
   per mail and rule. Mail found by an account's first sync triggers none.
+- **Gmail push**: Gmail publishes each change to a Pub/Sub topic, whose push
+  subscription calls `/events/gmail`; SMIO then processes that account at once,
+  unless its sync has already read the change. Polling every five minutes stays
+  as the fallback.
 - **SMIO's own mails** (summaries, notices) carry the header `X-SMIO-Mail` and are
   never classified; mail from the account's own address otherwise is.
 
@@ -317,6 +321,16 @@ asks you to confirm in-flight workflows have finished, and backs up the existing
 GCS database to a timestamped object under `backups/`. It resumes only the jobs it
 paused, including when deployment fails. Jobs already paused remain paused.
 The deploy defaults are 2 vCPU and 8 GiB memory to support CPU retraining.
+
+It also sets up Gmail push notifications: the Pub/Sub topic `smio-gmail`, which
+Gmail's publisher `gmail-api-push@system.gserviceaccount.com` may publish to, and
+after the deploy the push subscription `smio-gmail-push`, which calls
+`/events/gmail` with an identity token of the service account `smio-gmail-push`
+(its only right: invoking the service). The service gets the topic as
+`GMAIL_PUBSUB_TOPIC`; each Gmail account's sync then keeps a watch on its folders'
+labels, renewed a day before Gmail ends it after seven days. Without the topic,
+Gmail is only polled every five minutes. A Google Workspace organisation with the
+policy "domain restricted sharing" must allow Gmail's publisher as an exception.
 
 ```powershell
 .\scripts\deploy.ps1
@@ -635,6 +649,7 @@ it loads, so an unknown folder, list or step is rejected.
 | POST | `/inbox/undo_last_processing?count=n` | Restore the mails of the last `n` processing batches (default 1, max 20) to INBOX |
 | GET | `/summary/daily?summary_date=YYYY-MM-DD` | Return a stored snapshot or generate a preview |
 | POST | `/jobs/five-minute` | Cloud Scheduler: sync, process and act on new mail for every account |
+| POST | `/events/gmail` | Pub/Sub push: process the Gmail account a notification is for (503 while a workflow runs, so Pub/Sub retries) |
 | POST | `/jobs/daily` | Cloud Scheduler: gather, append to inbox, and retrain |
 | POST | `/jobs/daily/gather?summary_date=YYYY-MM-DD` | Store one fixed-period summary |
 | POST | `/jobs/daily/send?summary_date=YYYY-MM-DD` | Append a stored summary to the inbox |
@@ -654,9 +669,10 @@ it loads, so an unknown folder, list or step is rejected.
 - Several accounts with their own folder lists and models
 - Mailbox interface with IMAP and Gmail adapters, change cursors and events
 - Action rules with Claude Haiku reply drafts; reply status tracking
+- Gmail push notifications (Pub/Sub), with polling as the fallback
 
 **Next**
-- Gmail push notifications (Pub/Sub) instead of polling
+- Retraining for every folder list, not only `default`
 - `forward` and `ntfy` actions
 - Exchange (Microsoft Graph) adapter
 

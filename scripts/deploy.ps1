@@ -21,6 +21,9 @@ param(
     [string]$ImapHostSecret = "imap-host",
     [string]$ImapUserSecret = "imap-user",
     [string]$AnthropicApiKeySecret = "claude-api-key",
+    [string]$GmailPubSubTopic = "smio-gmail",
+    [string]$GmailPushSubscription = "smio-gmail-push",
+    [string]$GmailPushServiceAccount = "smio-gmail-push",
     [switch]$UpdateNerModel,
     [string]$NerModelDirectory = ".\models\ner-smio"
 )
@@ -105,6 +108,39 @@ function Invoke-Gcloud {
     & gcloud @Arguments
     if ($LASTEXITCODE -ne 0) {
         throw "gcloud failed with exit code ${LASTEXITCODE}: gcloud $($Arguments -join ' ')"
+    }
+}
+
+function Test-Gcloud {
+    # Whether a gcloud command succeeds, e.g. a describe of something that may not exist.
+    param([string[]]$Arguments)
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & gcloud @Arguments 2>&1 | Out-Null
+        return ($LASTEXITCODE -eq 0)
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+}
+
+function Invoke-GcloudWithRetry {
+    # A service account created a moment ago can take a few seconds to be usable in IAM.
+    param([string[]]$Arguments)
+
+    for ($attempt = 1; ; $attempt++) {
+        try {
+            Invoke-Gcloud $Arguments | Out-Null
+            return
+        }
+        catch {
+            if ($attempt -ge 5) {
+                throw
+            }
+            Start-Sleep -Seconds 5
+        }
     }
 }
 
@@ -356,7 +392,22 @@ Write-Host "Region:     $Region"
 Write-Host "Image:      $Image"
 Write-Host "GCS bucket: $GcsBucket"
 
-Invoke-Gcloud @("services", "enable", "artifactregistry.googleapis.com", "run.googleapis.com", "secretmanager.googleapis.com")
+Invoke-Gcloud @("services", "enable", "artifactregistry.googleapis.com", "run.googleapis.com", "secretmanager.googleapis.com", "pubsub.googleapis.com", "gmail.googleapis.com")
+
+# Gmail push notifications: Gmail publishes every change in a watched mailbox to
+# this topic (src/mail/gmail.py); the subscription is set up after the deploy.
+Write-Host "Setting up the Pub/Sub topic '$GmailPubSubTopic' for Gmail push notifications..."
+if (-not (Test-Gcloud @("pubsub", "topics", "describe", $GmailPubSubTopic, "--project=$ProjectId"))) {
+    Invoke-Gcloud @("pubsub", "topics", "create", $GmailPubSubTopic, "--project=$ProjectId") | Out-Null
+}
+# Gmail publishes as this Google-owned account. A Google Workspace organisation
+# with the policy "domain restricted sharing" must allow it as an exception.
+Invoke-Gcloud @(
+    "pubsub", "topics", "add-iam-policy-binding", $GmailPubSubTopic,
+    "--project=$ProjectId",
+    "--member=serviceAccount:gmail-api-push@system.gserviceaccount.com",
+    "--role=roles/pubsub.publisher"
+) | Out-Null
 
 # Credentials are kept only in Secret Manager; ask once for any that are missing.
 Confirm-Secret $ImapHostSecret "IMAP host" -Default (Resolve-ConfigValue "" "IMAP_HOST" $DotEnvValues) | Out-Null
@@ -470,7 +521,7 @@ if ($UpdateNerModel) {
     }
 }
 
-$deployEnvVars = "GOOGLE_CLOUD_PROJECT=$ProjectId,GCS_BUCKET=$GcsBucket,GCS_CLASSIFIER_MODEL_PREFIX=$GcsModelPrefix,GCS_NER_MODEL_PREFIX=$GcsNerModelPrefix,GCS_DATABASE_OBJECT=$GcsDatabaseObject,GCS_CONFIG_OBJECT=$GcsConfigObject,SMIO_SUMMARY_START_HOUR=$SummaryStartHour,SMIO_SUMMARY_TIMEZONE=$SummaryTimezone,SMIO_COMMAND_TIMEOUT_MINUTES=$CommandTimeoutMinutes"
+$deployEnvVars = "GOOGLE_CLOUD_PROJECT=$ProjectId,GCS_BUCKET=$GcsBucket,GCS_CLASSIFIER_MODEL_PREFIX=$GcsModelPrefix,GCS_NER_MODEL_PREFIX=$GcsNerModelPrefix,GCS_DATABASE_OBJECT=$GcsDatabaseObject,GCS_CONFIG_OBJECT=$GcsConfigObject,SMIO_SUMMARY_START_HOUR=$SummaryStartHour,SMIO_SUMMARY_TIMEZONE=$SummaryTimezone,SMIO_COMMAND_TIMEOUT_MINUTES=$CommandTimeoutMinutes,GMAIL_PUBSUB_TOPIC=projects/$ProjectId/topics/$GmailPubSubTopic"
 if ($NerModelRevision) {
     $deployEnvVars += ",SMIO_NER_MODEL_REVISION=$NerModelRevision"
 }
@@ -510,4 +561,55 @@ finally {
 Write-Host "Deployment completed successfully."
 $ServiceUrl = (& gcloud run services describe $ServiceName --project=$ProjectId --region=$Region --format="value(status.url)").Trim()
 Write-Host "Service URL: $ServiceUrl"
+
+# Pub/Sub delivers Gmail's notifications to the private service with an identity
+# token of a service account whose only right is calling the service.
+Write-Host "Setting up the Gmail push subscription '$GmailPushSubscription'..."
+$PushServiceAccount = "$GmailPushServiceAccount@$ProjectId.iam.gserviceaccount.com"
+if (-not (Test-Gcloud @("iam", "service-accounts", "describe", $PushServiceAccount, "--project=$ProjectId"))) {
+    Invoke-Gcloud @(
+        "iam", "service-accounts", "create", $GmailPushServiceAccount,
+        "--project=$ProjectId",
+        "--display-name=SMIO Gmail push"
+    ) | Out-Null
+}
+Invoke-GcloudWithRetry @(
+    "run", "services", "add-iam-policy-binding", $ServiceName,
+    "--project=$ProjectId",
+    "--region=$Region",
+    "--member=serviceAccount:$PushServiceAccount",
+    "--role=roles/run.invoker"
+)
+# Projects created before April 2021 must let Pub/Sub sign tokens for the account.
+$ProjectNumber = (& gcloud projects describe $ProjectId --format="value(projectNumber)").Trim()
+try {
+    Invoke-GcloudWithRetry @(
+        "iam", "service-accounts", "add-iam-policy-binding", $PushServiceAccount,
+        "--project=$ProjectId",
+        "--member=serviceAccount:service-$ProjectNumber@gcp-sa-pubsub.iam.gserviceaccount.com",
+        "--role=roles/iam.serviceAccountTokenCreator"
+    )
+}
+catch {
+    Write-Warning "Could not let Pub/Sub sign tokens for $PushServiceAccount; newer projects do not need it. $_"
+}
+$pushArguments = @(
+    "--project=$ProjectId",
+    "--push-endpoint=$ServiceUrl/events/gmail",
+    "--push-auth-service-account=$PushServiceAccount",
+    "--push-auth-token-audience=$ServiceUrl",
+    # A notification may wait for a running workflow; an old one is worthless,
+    # as the five-minute workflow reads the changes anyway.
+    "--ack-deadline=600",
+    "--message-retention-duration=1d",
+    "--min-retry-delay=10s",
+    "--max-retry-delay=600s"
+)
+if (Test-Gcloud @("pubsub", "subscriptions", "describe", $GmailPushSubscription, "--project=$ProjectId")) {
+    Invoke-GcloudWithRetry (@("pubsub", "subscriptions", "update", $GmailPushSubscription) + $pushArguments)
+}
+else {
+    Invoke-GcloudWithRetry (@("pubsub", "subscriptions", "create", $GmailPushSubscription, "--topic=$GmailPubSubTopic") + $pushArguments)
+}
+Write-Host "Gmail push notifications are delivered to $ServiceUrl/events/gmail."
 Write-Host "Smoke test: `$token = gcloud auth print-identity-token; Invoke-RestMethod '$ServiceUrl/' -Headers @{ Authorization = ``"Bearer `$token``" }"
