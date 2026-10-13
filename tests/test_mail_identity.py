@@ -6,7 +6,8 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from src.api.utils import imap_client, inbox_processor, mailer
+from src.api.utils import inbox_processor, mailer
+from src.mail import commands
 from src.api.utils.mail_identity import email_fingerprint, fingerprint, normalized_date
 from src.config import primary_account
 from src.db import database
@@ -266,7 +267,7 @@ def test_mail_already_in_its_folder_is_not_moved(db, server):
     mailbox = server(**{"INBOX": [], "INBOX/tech": [_message("1")]})
     email = Email(id=1, account="primary", uid="1", message_id="<a@test>", folder="INBOX/tech", classification="tech")
 
-    assert imap_client.move_email_to_classification_folder(_adapter(mailbox), email, primary_account()) is None
+    assert commands.move_email_to_classification_folder(_adapter(mailbox), email, primary_account()) is None
     assert mailbox.moves == []
     assert email.uid == "1"
 
@@ -354,7 +355,7 @@ def test_retention_does_not_trash_a_renumbered_uid(db, server, monkeypatch):
     mailbox.renumber("INBOX/tech")
     mailbox.folders["INBOX/tech"].append(_message("1", message_id="<new@test>", seen=True))
 
-    result = imap_client.cleanup_expired_mails(db, _adapter(mailbox), primary_account())
+    result = commands.cleanup_expired_mails(db, _adapter(mailbox), primary_account())
 
     assert result["moved"] == 0
     assert "another mail" in result["errors"][0]["error"]
@@ -371,7 +372,7 @@ def test_retention_trashes_a_verified_mail_and_forgets_its_uid(db, server):
     ))
     db.commit()
 
-    result = imap_client.cleanup_expired_mails(db, _adapter(mailbox), primary_account())
+    result = commands.cleanup_expired_mails(db, _adapter(mailbox), primary_account())
 
     email = db.query(Email).one()
     assert result["moved"] == 1

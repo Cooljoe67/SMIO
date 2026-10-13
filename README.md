@@ -30,9 +30,11 @@ SMIO/
   src/
     ai/                 # classification, NER, summaries, retraining
     api/
-      routers/          # inbox, IMAP, summary, scheduled jobs
-      utils/            # mailbox, commands, folder rules, email delivery
+      routers/          # inbox, mail sync, summary, scheduled jobs
+      utils/            # email commands, folder rules, email delivery
     db/                 # database engine, migrations, ORM models
+    mail/               # mailbox interface, IMAP and Gmail adapters, sync,
+                        # events, action rules, drafts, sorting/undo/retention
     scheduler/          # scheduled workflow orchestration
     storage/            # Google Cloud Storage and Secret Manager integration
   scripts/              # deployment, data import/export, training, maintenance
@@ -484,7 +486,7 @@ GCS continues to store the deployed classifier model.
 
 ## 📬 How it works
 
-1. **Sync & fetch** — reconcile known messages across IMAP folders, fetch new INBOX mails ([src/api/utils/imap_client.py](src/api/utils/imap_client.py)).
+1. **Sync & fetch** — reconcile known messages across IMAP folders, fetch new INBOX mails ([src/mail/sync.py](src/mail/sync.py)).
 2. **Process** — classify each new mail, run NER for `delivery` mails, move it into its category folder, apply retention-based cleanup ([src/api/utils/inbox_processor.py](src/api/utils/inbox_processor.py)).
 3. **Summarize** — gather and persist a logical-day snapshot, then append its plain-language digest to the IMAP inbox.
 4. **Retrain (if due)** — once enough manual corrections have accumulated, fine-tune the classifier using a replay buffer (90% old data / 10% new corrections per class) and apply the macro-F1, paired-bootstrap, and per-class recall promotion gates on a fixed hold-out set. After a completed run, SMIO emails the baseline and candidate metrics, confidence interval, per-class recall, training duration, and promotion outcome.
@@ -495,8 +497,8 @@ GCS continues to store the deployed classifier model.
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/imap/fetch` | Sync folders and fetch new INBOX mails |
-| GET | `/imap/sync` | Reconcile known messages across all classification folders |
+| GET | `/mail/fetch` | Sync folders and fetch new INBOX mails |
+| GET | `/mail/sync` | Reconcile known messages across all classification folders |
 | POST | `/inbox/process_unprocessed` | Classify + extract entities + move all unprocessed mails |
 | POST | `/inbox/undo_last_processing?count=n` | Restore the mails of the last `n` processing batches (default 1, max 20) to INBOX |
 | GET | `/summary/daily?summary_date=YYYY-MM-DD` | Return a stored snapshot or generate a preview |

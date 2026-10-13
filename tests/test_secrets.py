@@ -6,7 +6,6 @@ import pytest
 from imap_tools import MailboxLoginError
 
 from src import config
-from src.api.utils import imap_client
 from src.mail import imap as mail_imap
 from src.storage import secret_store
 

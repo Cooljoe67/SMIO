@@ -5,7 +5,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.api.routers import inbox as inbox_router
-from src.api.utils import command_processor, imap_client, inbox_processor
+from src.api.utils import command_processor, inbox_processor
+from src.mail import commands
 from src.config import primary_account
 from src.db.database import get_db
 from src.db.models import Email
@@ -64,7 +65,7 @@ def mailbox(monkeypatch):
     fake = FakeMailBox()
     monkeypatch.setattr(mail_imap, "MailBox", lambda host: fake)
     # UID verification has its own tests in test_mail_identity.py.
-    monkeypatch.setattr(imap_client, "_verify_uid", lambda mailbox, email, folder: object())
+    monkeypatch.setattr(commands, "_verify_uid", lambda mailbox, email, folder: object())
     return fake
 
 

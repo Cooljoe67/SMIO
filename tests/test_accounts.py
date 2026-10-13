@@ -6,7 +6,8 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 
 from src import config
-from src.api.utils import command_processor, imap_client, inbox_processor
+from src.api.utils import command_processor, inbox_processor
+from src.mail import commands
 from src.db import database
 from src.db.models import Base, Email
 from src.mail import sync as mail_sync
@@ -76,7 +77,7 @@ def mailboxes(monkeypatch):
 
     monkeypatch.setattr(inbox_processor, "open_mailbox", open_mailbox)
     # UID verification has its own tests in test_mail_identity.py.
-    monkeypatch.setattr(imap_client, "_verify_uid", lambda mailbox, email, folder: object())
+    monkeypatch.setattr(commands, "_verify_uid", lambda mailbox, email, folder: object())
     return opened
 
 

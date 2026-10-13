@@ -7,17 +7,17 @@ Each command writes the new state to the database at once and records a
 import logging
 from datetime import datetime, timedelta, timezone
 
-from src.db.models import Email
-from src.mail.events import record
-
-from .mail_identity import is_same_mail
-from .folder_rules import (
+from src.api.utils.folder_rules import (
     folder_for_classification,
     folder_path,
     folder_rules,
     inbox_folder,
     trash_folder,
 )
+from src.api.utils.mail_identity import is_same_mail
+from src.db.models import Email
+
+from .events import record
 
 logger = logging.getLogger(__name__)
 

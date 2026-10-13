@@ -8,7 +8,7 @@ from src.ai.email_metadata import extract_email_metadata, serialize_sources
 from src.ai.ner import amazon_sender_status, serialize_entities
 from src.db.models import Email
 from src.api.utils.folder_rules import classification_folders, inbox_folder
-from src.api.utils.imap_client import (
+from src.mail.commands import (
     move_email_to_classification_folder,
     move_email_to_inbox,
 )

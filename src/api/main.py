@@ -2,7 +2,7 @@ import logging
 
 from fastapi import FastAPI
 from .middleware import publish_database_changes
-from .routers import imap, inbox, jobs, summary
+from .routers import inbox, jobs, mail, summary
 
 from src.db.database import (
     backfill_fingerprints,
@@ -36,7 +36,7 @@ app = FastAPI(
 app.middleware("http")(publish_database_changes)
 app.include_router(inbox.router)
 app.include_router(summary.router)
-app.include_router(imap.router)
+app.include_router(mail.router)
 app.include_router(jobs.router)
 
 @app.get("/")

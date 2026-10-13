@@ -9,7 +9,6 @@ import pytest
 from sqlalchemy import create_engine, text
 
 from src import config
-from src.api.utils import imap_client
 from src.mail import imap as mail_imap
 from src.db import database
 from src.scheduler import workflows

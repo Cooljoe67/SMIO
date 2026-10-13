@@ -13,13 +13,13 @@ import re
 from datetime import date, datetime, timedelta, timezone
 
 from src.api.utils.folder_rules import folder_path, folder_rules, inbox_folder
-from src.api.utils.imap_client import cleanup_expired_mails
 from src.api.utils.mail_identity import fingerprint, normalized_date
 from src.api.utils.mailer import OWN_MAIL_HEADER
 from src.db.database import SessionLocal
 from src.db.models import Email, MailSyncState
 
 from . import CursorExpired, open_mailbox
+from .commands import cleanup_expired_mails
 from .events import record
 
 logger = logging.getLogger(__name__)
