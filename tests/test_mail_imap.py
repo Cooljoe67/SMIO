@@ -162,3 +162,26 @@ def test_providers_without_an_adapter_are_refused():
 
     with pytest.raises(NotImplementedError, match="exchange"):
         open_mailbox(account)
+
+
+def test_login_verifies_the_server_certificate(monkeypatch):
+    import ssl
+
+    from src.mail import imap
+
+    contexts = []
+
+    class FakeMailBox:
+        def __init__(self, host, ssl_context=None):
+            contexts.append(ssl_context)
+
+        def login(self, username, password):
+            return self
+
+    monkeypatch.setattr(imap, "MailBox", FakeMailBox)
+    account = SimpleNamespace(
+        id="a", unavailable=None, provider="imap",
+        imap=SimpleNamespace(host="h", username="u", password="p", password_secret=None),
+    )
+    imap.connect(account)
+    assert contexts[0].verify_mode == ssl.CERT_REQUIRED and contexts[0].check_hostname

@@ -1,10 +1,17 @@
 """IMAP adapter (imap_tools)."""
 
+import ssl
+
 from imap_tools import AND, H, U, MailBox, MailboxLoginError, MailMessageFlags
 
 from src.storage import secret_store
 
 from .base import CursorExpired, FolderState, Mailbox, MailMessage
+
+
+def _mailbox(host):
+    # imaplib's default context skips certificate checks; verify the server.
+    return MailBox(host, ssl_context=ssl.create_default_context())
 
 
 def connect(account):
@@ -21,18 +28,18 @@ def connect(account):
             raise RuntimeError(
                 f"Account {account.id!r}: no IMAP password; set the variable its config refers to"
             )
-        return MailBox(imap.host).login(imap.username, imap.password)
+        return _mailbox(imap.host).login(imap.username, imap.password)
 
     password = secret_store.read_secret(imap.password_secret)
     try:
-        return MailBox(imap.host).login(imap.username, password)
+        return _mailbox(imap.host).login(imap.username, password)
     except MailboxLoginError:
         # The password may have been rotated since it was cached.
         secret_store.invalidate(imap.password_secret)
         current = secret_store.read_secret(imap.password_secret)
         if current == password:
             raise
-        return MailBox(imap.host).login(imap.username, current)
+        return _mailbox(imap.host).login(imap.username, current)
 
 
 def _first(value):
