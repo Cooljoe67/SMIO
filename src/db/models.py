@@ -132,6 +132,18 @@ class MailSyncState(Base):
     updated_at = Column(DateTime, default=_utcnow, nullable=False)
 
 
+class MailWatch(Base):
+    """An account's push notifications from its provider (Gmail: users.watch)."""
+
+    __tablename__ = "mail_watches"
+
+    account = Column(String, primary_key=True)
+    # The watched folders, sorted and one per line: a new folder needs a new watch.
+    folders = Column(Text, nullable=False, default="")
+    expires_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=_utcnow, nullable=False)
+
+
 class MailEvent(Base):
     """A change of a mail's state, in the provider-neutral format of
     src/mail/events.py; also the outbox its actions are run from."""

@@ -7,7 +7,7 @@ from email.utils import format_datetime
 import pytest
 
 from src import config
-from src.db.models import Email, MailEvent, MailSyncState
+from src.db.models import Email, MailEvent, MailSyncState, MailWatch
 from src.mail import CursorExpired
 from src.mail import gmail as gmail_module
 from src.mail import sync as mail_sync
@@ -39,6 +39,8 @@ class FakeGmail:
         self.drafts = []
         self.calls = []
         self.rate_limited = 0
+        self.watches = []
+        self.watch_fails = False
 
     def add(self, message_id, *labels, days_old=0, subject="Lieferung", unread=True):
         date = NOW - timedelta(days=days_old)
@@ -102,6 +104,12 @@ class FakeGmail:
                            "'Units per minute per user'",
                 "errors": [{"reason": "rateLimitExceeded"}],
             }})
+        if (method, path) == ("POST", "watch"):
+            if self.watch_fails:
+                return Response(404, {"error": {"message": "Resource not found: topic"}})
+            self.watches.append(json)
+            expiration = int((NOW + timedelta(days=7)).timestamp() * 1000)
+            return Response(200, {"historyId": str(self.history_id), "expiration": str(expiration)})
         if (method, path) == ("GET", "labels"):
             return Response(200, {"labels": [{"id": i, "name": n} for n, i in self.labels.items()]})
         if (method, path) == ("POST", "labels"):
@@ -344,3 +352,38 @@ def test_a_large_first_import_is_spread_over_runs_and_stays_a_first_read(
         e.message_id: e.initial for e in db.query(MailEvent).filter(MailEvent.event_type == "received")
     }
     assert received == {"<a@test>": True, "<b@test>": True, "<c@test>": True, "<d@test>": False}
+
+
+def test_a_watch_covers_the_folders_labels_and_ends_after_seven_days(account, api):
+    expires_at = _mailbox(account, api).watch("projects/p/topics/t", ["INBOX", LABEL, "Missing"])
+
+    assert api.watches == [{
+        "topicName": "projects/p/topics/t",
+        "labelIds": ["INBOX", "Label_1"],
+        "labelFilterBehavior": "include",
+    }]
+    assert expires_at == (NOW + timedelta(days=7)).replace(tzinfo=None)
+
+
+def test_the_sync_keeps_the_watch_running(db, api, synced, monkeypatch):
+    monkeypatch.setattr(mail_sync, "PUSH_TARGETS", {"gmail": "projects/p/topics/t"})
+    api.add("a", "INBOX")
+
+    synced()
+    synced()
+    assert len(api.watches) == 1
+    assert sorted(api.watches[0]["labelIds"]) == ["INBOX", "Label_1", "SENT"]
+
+    watch = db.get(MailWatch, "mail")
+    watch.expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=2)
+    db.commit()
+    synced()
+    assert len(api.watches) == 2
+
+    # A failing renewal leaves polling working.
+    api.watch_fails = True
+    db.get(MailWatch, "mail").expires_at = None
+    db.commit()
+    api.deliver("b", "INBOX")
+    synced()
+    assert db.query(Email).count() == 2

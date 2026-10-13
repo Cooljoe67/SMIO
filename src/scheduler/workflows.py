@@ -14,13 +14,14 @@ from src.ai.retrain import retrain_if_due
 from src.api.utils.command_processor import process_instruction_mails
 from src.mail import PROVIDERS
 from src.mail.events import dispatch as dispatch_events
+from src.mail.gmail import address_key
 from src.mail.sync import fetch_inbox
 from src.api.utils.inbox_processor import process_unprocessed_emails
 from src.api.utils.mailer import append_summary_to_inbox
 from src.api.utils.reply_tracking import update_statuses_from_replies
 from src.config import get_config, reload_config, require_stored_account_ids
 from src.db.database import SessionLocal, persist_database
-from src.db.models import SummarySnapshot
+from src.db.models import MailSyncState, SummarySnapshot
 
 logger = logging.getLogger(__name__)
 _workflow_lock = Lock()
@@ -94,6 +95,51 @@ def run_five_minute_workflow():
         return {"accounts": results}
 
     return _run_exclusively("five-minute workflow", routine)
+
+
+def _history_read(account_id, history_id):
+    """Whether the account's sync already read its changes up to history_id."""
+    db = SessionLocal()
+    try:
+        cursors = [
+            state.cursor
+            for state in db.query(MailSyncState).filter(MailSyncState.account == account_id)
+        ]
+    finally:
+        db.close()
+    return bool(cursors) and all(
+        (cursor or "").isdigit() and int(cursor) >= int(history_id) for cursor in cursors
+    )
+
+
+def run_gmail_push(address, history_id):
+    """Process the Gmail account a push notification is for, like the five-minute
+    workflow does, unless its sync is already past the notification (e.g. the
+    echo of SMIO's own change)."""
+    wanted = address_key(address)
+    account = next(
+        (a for a in get_config().accounts if a.provider == "gmail" and address_key(a.email) == wanted),
+        None,
+    )
+    if account is None:
+        return {"ignored": "unknown_mailbox"}
+    if str(history_id).isdigit() and _history_read(account.id, history_id):
+        return {"skipped": True, "reason": "up_to_date"}
+
+    def routine():
+        for position, current in enumerate(get_config().accounts):
+            if current.id != account.id:
+                continue
+            try:
+                outcome = _process_account(current, is_primary=position == 0)
+            except Exception as error:
+                # Acknowledged anyway: the five-minute workflow retries the account.
+                logger.exception("Gmail push failed for account %s", current.id)
+                outcome = {"error": str(error)}
+            return {"accounts": {current.id: outcome}}
+        return {"ignored": "unknown_mailbox"}
+
+    return _run_exclusively("Gmail push", routine)
 
 
 def _gather_summary(summary_date=None, force=False):

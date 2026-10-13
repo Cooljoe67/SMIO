@@ -16,7 +16,7 @@ from src.api.utils.folder_rules import folder_path, folder_rules, inbox_folder
 from src.api.utils.mail_identity import fingerprint, normalized_date
 from src.api.utils.mailer import OWN_MAIL_HEADER
 from src.db.database import SessionLocal
-from src.db.models import Email, MailSyncState
+from src.db.models import Email, MailSyncState, MailWatch
 
 from . import CursorExpired, open_mailbox
 from .commands import cleanup_expired_mails
@@ -34,6 +34,10 @@ FULL_SYNC_MINUTES = int(os.getenv("SMIO_FULL_SYNC_MINUTES", "60"))
 # mails per account and run, so a large first import stays within their rate
 # limits; the rest follows in the next runs.
 MAX_FETCHES = int(os.getenv("SMIO_SYNC_MAX_FETCHES", "500"))
+# Where providers send push notifications; unset: changes are only polled.
+PUSH_TARGETS = {"gmail": os.getenv("GMAIL_PUBSUB_TOPIC", "")}
+# Gmail ends a watch after seven days; renew it in time.
+WATCH_RENEWAL = timedelta(hours=24)
 
 
 def _utcnow():
@@ -204,6 +208,39 @@ def observe(
     return email_obj
 
 
+def _renew_watch(db, account, mailbox, folders, now):
+    """Keep the provider's push notifications running for the watched folders.
+
+    Polling stays the fallback: a failed renewal is logged and the sync goes on.
+    """
+    target = PUSH_TARGETS.get(account.provider)
+    if not target:
+        return
+    wanted = "\n".join(sorted(set(folders)))
+    watch = db.get(MailWatch, account.id)
+    if (
+        watch is not None
+        and watch.folders == wanted
+        and watch.expires_at is not None
+        and watch.expires_at > now + WATCH_RENEWAL
+    ):
+        return
+    try:
+        expires_at = mailbox.watch(target, sorted(set(folders)))
+    except Exception:
+        logger.exception("Could not renew push notifications of account %s", account.id)
+        return
+    if expires_at is None:
+        return
+    if watch is None:
+        watch = MailWatch(account=account.id)
+        db.add(watch)
+    watch.folders = wanted
+    watch.expires_at = expires_at
+    watch.updated_at = now
+    logger.info("Push notifications of account %s run until %s", account.id, expires_at)
+
+
 def _full_read_due(state, now):
     return (
         state is None
@@ -297,7 +334,8 @@ def sync_account(account, allow_new, full=False):
                 # A truncated first read gets no state: it stays a first read, whose
                 # mail triggers no actions, until all of it is fetched.
 
-            for folder_name in _folder_names(mailbox, account):
+            folder_names = _folder_names(mailbox, account)
+            for folder_name in folder_names:
                 sync_folder(
                     _read(mailbox, folder_name, states.get(folder_name), full, sync_started),
                     allow_new and folder_name == inbox,
@@ -315,6 +353,9 @@ def sync_account(account, allow_new, full=False):
                 )
             sent_result = {"folder": sent, "new": len(new_emails) - new_before_sent}
             del new_emails[new_before_sent:]
+            _renew_watch(
+                db, account, mailbox, [*folder_names, *([sent] if sent else [])], sync_started
+            )
 
             # The stale check runs in SQL: write this sync's last_seen_at and
             # folders first (autoflush is off), or every mail seen counts as gone.

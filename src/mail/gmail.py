@@ -12,6 +12,10 @@ has not stored. A complete read imports only mail of the last IMPORT_DAYS; older
 mail in the inbox is left alone. Changes are read from Gmail's history: the
 cursor is a historyId, which expires after about a week.
 
+Push notifications: users.watch makes Gmail publish a message to a Pub/Sub topic
+on every change in the watched labels, for seven days; the sync renews it. The
+topic's push subscription calls /events/gmail (src/api/routers/events.py).
+
 Authorisation (personal Gmail account): an OAuth client of type "Desktop app"
 in the project's Google Auth Platform (External, In production; the
 gmail.modify scope may stay unverified for personal use) and a refresh token
@@ -20,7 +24,9 @@ Google Workspace would differ: no refresh tokens, but a service account with
 domain-wide delegation (Admin console > Security > API controls: the service
 account's client id with the gmail.modify scope), used as
 service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
-.with_subject(account.email); an "Internal" app needs no publishing.
+.with_subject(account.email); an "Internal" app needs no publishing. An
+organisation with the policy "domain restricted sharing" must also allow the
+Google-owned publisher gmail-api-push@system.gserviceaccount.com on the topic.
 """
 
 import base64
@@ -96,6 +102,15 @@ def connect(account):
         scopes=SCOPES,
     )
     return AuthorizedSession(credentials)
+
+
+def address_key(address):
+    """An address in the form Gmail compares it: case and dots in the name do
+    not matter, and googlemail.com is gmail.com."""
+    name, _, domain = (address or "").strip().lower().partition("@")
+    if domain in ("gmail.com", "googlemail.com"):
+        return name.replace(".", "") + "@gmail.com"
+    return f"{name}@{domain}"
 
 
 def _b64encode(raw):
@@ -224,6 +239,17 @@ class GmailMailbox(Mailbox):
 
     def folders(self):
         return list(self._label_ids())
+
+    def watch(self, target, folders):
+        labels = [label for label in map(self._label_id, folders) if label]
+        response = self._request("POST", "watch", json={
+            "topicName": target,
+            "labelIds": labels,
+            "labelFilterBehavior": "include",
+        })
+        return datetime.fromtimestamp(
+            int(response["expiration"]) / 1000, timezone.utc
+        ).replace(tzinfo=None)
 
     def sent_folder(self):
         return self.account.mailbox.sent or "SENT"

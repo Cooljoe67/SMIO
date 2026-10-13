@@ -82,6 +82,11 @@ class Mailbox(ABC):
     def close(self):
         pass
 
+    def watch(self, target, folders):
+        """Ask the provider to notify target (Gmail: a Pub/Sub topic) of changes
+        in folders. Returns when that ends, or None if the provider cannot."""
+        return None
+
     @abstractmethod
     def folders(self):
         """Names of the folders (Gmail: labels) that exist."""
