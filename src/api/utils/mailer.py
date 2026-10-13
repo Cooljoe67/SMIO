@@ -13,6 +13,11 @@ from .folder_rules import inbox_folder
 
 logger = logging.getLogger(__name__)
 
+# Marks the mails SMIO writes itself: the sync never classifies them. Mail
+# clients do not copy it into replies or forwards, unlike a marker in the
+# subject or body; and SMIO stores its mails directly, so nothing removes it.
+OWN_MAIL_HEADER = "X-SMIO-Mail"
+
 
 def append_summary_to_inbox(
     body,
@@ -20,6 +25,7 @@ def append_summary_to_inbox(
     subject="SMIO Daily Summary",
     attachments=None,
     account=None,
+    kind="notice",
 ):
     account = account or primary_account()
 
@@ -53,6 +59,7 @@ def append_summary_to_inbox(
     # Without these the mail could only be recognised by its UID.
     message["Message-ID"] = make_msgid(domain=account.email.rpartition("@")[2] or None)
     message["Date"] = formatdate(localtime=True)
+    message[OWN_MAIL_HEADER] = kind
 
     try:
         with open_mailbox(account) as mailbox:

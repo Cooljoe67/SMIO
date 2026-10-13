@@ -238,6 +238,52 @@ def backfill_fingerprints():
         db.close()
 
 
+def requeue_own_address_mails():
+    """Queue for classification the inbox mails from an account's own address
+    that SMIO took for its own; safe to repeat.
+
+    SMIO used to recognise its mails by their sender, so a FRITZ!Box or a note
+    sent from the own address was never classified. Its mails now carry the
+    X-SMIO-Mail header and mention SMIO in the subject; the others go back to
+    the queue.
+    """
+    from email.utils import parseaddr
+
+    from src.config import get_config
+    from src.db.models import Email
+
+    db = SessionLocal()
+    try:
+        requeued = 0
+        for account in get_config().accounts:
+            address = parseaddr(account.email or "")[1].casefold()
+            if not address:
+                continue
+            emails = db.query(Email).filter(
+                Email.account == account.id,
+                Email.folder == account.mailbox.inbox,
+                Email.classification_source == "system",
+                Email.removed_at.is_(None),
+                Email.is_training_data.is_(False),
+                ~Email.subject.ilike("%smio%"),
+            ).all()
+            for email in emails:
+                if parseaddr(email.sender or "")[1].casefold() != address:
+                    continue
+                email.processed = 0
+                email.processed_at = None
+                email.processing_batch = None
+                email.classification = None
+                email.classification_source = None
+                email.confidence = None
+                requeued += 1
+        if requeued:
+            db.commit()
+        return requeued
+    finally:
+        db.close()
+
+
 def ensure_summary_snapshot_columns():
     required_columns = {
         "total_entries": "INTEGER",

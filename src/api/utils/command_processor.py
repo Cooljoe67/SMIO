@@ -22,11 +22,13 @@ from src.ai import classifier
 from src.ai.daily_summary import build_daily_summary
 from src.ai.retrain import restore_previous_model, retrain_if_due
 from src.db.database import SessionLocal
+from src.db.models import Email
+from src.mail.events import record
 from src.storage import gcs
 
 from src.mail import open_mailbox
 
-from .folder_rules import inbox_folder
+from .folder_rules import inbox_folder, trash_folder
 from .inbox_processor import MAX_UNDO_BATCHES, undo_processing_batches
 from .mailer import append_summary_to_inbox
 
@@ -130,6 +132,7 @@ def _run_command(db, command, account, is_primary=False):
             html_body=summary.get("html_message"),
             subject="SMIO Summary (on demand)",
             account=account,
+            kind="summary",
         )
         return {"command": command, "sent": sent}
 
@@ -174,6 +177,34 @@ def _command_failed(result):
         or result.get("restored") is False
         or result.get("sent") is False
     )
+
+
+def _forget_command_mail(db, account, inbox, uid):
+    """Record the trashed command mail at once, so it is never classified."""
+    email = db.query(Email).filter(
+        Email.account == account.id,
+        Email.folder == inbox,
+        Email.uid == str(uid),
+        Email.removed_at.is_(None),
+    ).first()
+    if email is None:
+        # Not synced yet, and now gone from the inbox.
+        return
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    record(
+        db, account, email, "removed",
+        from_folder=inbox, to_folder=trash_folder(account), source="system",
+    )
+    email.folder = trash_folder(account)
+    email.uid = None
+    email.removed_at = now
+    email.removal_reason = "command"
+    email.processed = max(int(email.processed or 0), 1)
+    email.processed_at = now
+    email.classification = "other"
+    email.classification_source = "system"
+    email.folder_list = account.folder_list
+    db.commit()
 
 
 def _attempt_id(account, uid):
@@ -328,6 +359,7 @@ def process_instruction_mails(account, is_primary=False):
                 try:
                     _save_command_attempt(attempt_id, attempt)
                     mailbox.trash(inbox, [uid])
+                    _forget_command_mail(db, account, inbox, uid)
                 except Exception as error:
                     errors.append({"command": command, "error": str(error)})
                     logger.exception("Could not prepare instruction command %s", command)

@@ -9,6 +9,7 @@ from src.db.database import (
     backfill_retrain_runs,
     engine,
     ensure_email_columns,
+    requeue_own_address_mails,
     ensure_summary_snapshot_columns,
     persist_database,
 )
@@ -21,6 +22,7 @@ ensure_email_columns()
 ensure_summary_snapshot_columns()
 backfill_retrain_runs()
 backfill_fingerprints()
+requeue_own_address_mails()
 persist_database()
 
 

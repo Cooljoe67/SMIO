@@ -113,6 +113,7 @@ def _send_summary(summary_date=None):
         sent = append_summary_to_inbox(
             summary["message"],
             html_body=summary.get("html_message"),
+            kind="summary",
         )
         stored = mark_summary_sent(db, summary["summary_date"], sent)
         return {"summary": stored, "summary_sent": sent}

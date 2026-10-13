@@ -114,7 +114,7 @@ def test_summary_command_reports_the_requesting_accounts_mail(db, mailboxes, mon
     monkeypatch.setattr(
         command_processor,
         "append_summary_to_inbox",
-        lambda body, html_body=None, subject=None, account=None: appended.append((body, account)) or True,
+        lambda body, html_body=None, subject=None, account=None, kind=None: appended.append((body, account)) or kind == "summary",
     )
 
     result = command_processor._run_command(db, "summary", second)

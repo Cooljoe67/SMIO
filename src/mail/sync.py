@@ -15,6 +15,7 @@ from datetime import date, datetime, timedelta, timezone
 from src.api.utils.folder_rules import folder_path, folder_rules, inbox_folder
 from src.api.utils.imap_client import cleanup_expired_mails
 from src.api.utils.mail_identity import fingerprint, normalized_date
+from src.api.utils.mailer import OWN_MAIL_HEADER
 from src.db.database import SessionLocal
 from src.db.models import Email, MailSyncState
 
@@ -175,6 +176,13 @@ def observe(
         email_obj.read_at = _utcnow()
         logger.info("Email %s first observed as read", email_obj.id)
 
+    if new_email and not outbound and msg.header(OWN_MAIL_HEADER):
+        # Written by SMIO itself (summary, notice): never classified or moved.
+        email_obj.processed = 1
+        email_obj.processed_at = _utcnow()
+        email_obj.classification = "other"
+        email_obj.classification_source = "system"
+        email_obj.folder_list = account.folder_list
     if new_email:
         db.add(email_obj)
         # Make the new row visible to the next lookup in this sync (autoflush is off).
