@@ -1,10 +1,11 @@
-"""Action rules from config/smio.yaml (actions:), run on mail events.
+"""Action rules from config/smio.yaml, run on mail events.
 
-A rule applies to an event if any of its `when` entries matches; an entry
-matches if every condition it gives holds. Each of its steps becomes an action
-"rule:<name>:<step>" of src/mail/events.py, so it runs at most once per mail:
-a mail that matches several entries, or is moved into the folder twice, is
-handled once.
+Rules are defined per folder list and overridden per account (see
+src.config.ActionRule). A rule applies to an event if any of its `when`
+entries matches; an entry matches if every condition it gives holds. Each of
+its steps becomes an action "rule:<name>:<step>" of src/mail/events.py, so it
+runs at most once per mail: a mail that matches several entries, or is moved
+into the folder twice, is handled once, also after the rule was overridden.
 """
 
 from email.utils import parseaddr
@@ -44,13 +45,22 @@ def matches(trigger, event, email, account):
     )
 
 
-def _applies(rule, db, event):
-    if rule.accounts is not None and event.account not in rule.accounts:
-        return False
+def _step(event, name, kind):
+    """The event's account and its rule `name` if that has a step `kind`, else (None, None)."""
+    config = get_config()
     try:
-        account = get_config().account(event.account)
+        account = config.account(event.account)
     except ValueError:
         # The account was removed from the config.
+        return None, None
+    rule = config.rules_for(account).get(name)
+    step = next((step for step in rule.do if step.kind == kind), None) if rule else None
+    return (account, rule) if step else (None, None)
+
+
+def _applies(name, kind, db, event):
+    account, rule = _step(event, name, kind)
+    if rule is None:
         return False
     email = db.get(Email, event.email_id)
     return email is not None and any(
@@ -58,15 +68,25 @@ def _applies(rule, db, event):
     )
 
 
+def _run(name, kind, db, event):
+    _, rule = _step(event, name, kind)
+    step = next(step for step in rule.do if step.kind == kind)
+    STEPS[kind](db, event, getattr(step, kind))
+
+
 def configured_actions():
-    """The configured rules as events actions: name -> (applies, run)."""
-    actions = {}
-    for name, rule in get_config().actions.items():
-        for step in rule.do:
-            actions[f"rule:{name}:{step.kind}"] = (
-                lambda db, event, rule=rule: _applies(rule, db, event),
-                lambda db, event, step=step: STEPS[step.kind](
-                    db, event, getattr(step, step.kind)
-                ),
-            )
-    return actions
+    """Every account's rules as events actions: "rule:<name>:<kind>" -> (applies, run)."""
+    config = get_config()
+    steps = {
+        (name, step.kind)
+        for account in config.accounts
+        for name, rule in config.rules_for(account).items()
+        for step in rule.do
+    }
+    return {
+        f"rule:{name}:{kind}": (
+            lambda db, event, name=name, kind=kind: _applies(name, kind, db, event),
+            lambda db, event, name=name, kind=kind: _run(name, kind, db, event),
+        )
+        for name, kind in sorted(steps)
+    }

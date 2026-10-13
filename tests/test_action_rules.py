@@ -26,18 +26,33 @@ accounts:
     folder_list: default
     imap: {host: imap.test, username: owner@firma.test, password: x}
 actions:
-  draft:
-    when:
-      - {event: moved, to: delivery}
-    do:
-      - create_draft: {instructions: "Mit freundlichen Grüßen"}
-  sorted_by_model:
-    when:
-      - {event: moved, to: tech, source: system}
-      - {event: received, from: "@alarm.test", subject_contains: STÖRUNG}
-    do:
-      - create_draft
+  default:
+    draft:
+      when:
+        - {event: moved, to: delivery}
+      do:
+        - create_draft: {instructions: "Mit freundlichen Grüßen"}
+    sorted_by_model:
+      when:
+        - {event: moved, to: tech, source: system}
+        - {event: received, from: "@alarm.test", subject_contains: STÖRUNG}
+      do:
+        - create_draft
 """
+
+OVERRIDES = """
+    actions:
+      draft:
+        when:
+          - {event: moved, to: delivery}
+        do:
+          - create_draft: {instructions: "Immer duzen"}
+      sorted_by_model: {enabled: false}
+"""
+
+
+def _with_overrides(text=RULES, overrides=OVERRIDES):
+    return text.replace("    imap: {host: imap.test", overrides.lstrip("\n") + "    imap: {host: imap.test", 1)
 
 
 @pytest.fixture
@@ -57,10 +72,32 @@ def test_a_rule_must_name_a_folder_of_its_accounts_list():
     )
 
 
-def test_a_rule_must_name_known_accounts():
-    assert "unknown account(s) ['nobody']" in _parse_error(
-        RULES.replace("  draft:\n", "  draft:\n    accounts: [nobody]\n")
+def test_rules_belong_to_a_known_folder_list():
+    assert "unknown folder list(s) ['logistik']" in _parse_error(
+        RULES.replace("actions:\n  default:", "actions:\n  logistik:")
     )
+
+
+def test_an_account_can_only_switch_off_a_rule_its_list_has():
+    assert "switches off unknown action 'drafts'" in _parse_error(
+        _with_overrides(overrides="    actions: {drafts: {enabled: false}}\n")
+    )
+
+
+def test_an_account_rule_replaces_or_switches_off_the_lists_rule():
+    parsed = config.parse_config(_with_overrides())
+
+    rules = parsed.rules_for(parsed.account("primary"))
+
+    assert list(rules) == ["draft"]
+    assert rules["draft"].do[0].create_draft.instructions == "Immer duzen"
+    assert set(config.parse_config(RULES).rules_for(primary_account_of(RULES))) == {
+        "draft", "sorted_by_model"
+    }
+
+
+def primary_account_of(text):
+    return config.parse_config(text).account("primary")
 
 
 def test_a_folder_condition_needs_a_moved_event():
@@ -71,7 +108,7 @@ def test_a_folder_condition_needs_a_moved_event():
 
 def test_actions_that_do_not_exist_yet_are_refused():
     assert "forward" in _parse_error(
-        RULES.replace("      - create_draft\n", "      - forward: {to: a@b.test}\n")
+        RULES.replace("        - create_draft\n", "        - forward: {to: a@b.test}\n")
     )
 
 
@@ -222,3 +259,14 @@ def test_a_cut_off_or_refused_draft_is_an_error(monkeypatch, stop_reason):
 
     with pytest.raises(reply_draft.DraftError):
         reply_draft.write_reply(Email(subject="x", sender="a@b.test", text="x"))
+
+
+def test_the_accounts_override_is_what_runs(db, drafted, monkeypatch):
+    monkeypatch.setattr(config, "_config", config.parse_config(_with_overrides()))
+    _sync()
+    _user_move(drafted, "INBOX/delivery")
+    _sync()
+
+    events.dispatch(db, primary_account())
+
+    assert drafted.calls == [("Lieferung", "Marcus", "Immer duzen")]

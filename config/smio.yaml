@@ -100,6 +100,9 @@ accounts:
   #     client_secret_secret: exchange-example-client-secret
 
 # Actions on mail events (src/mail/rules.py), checked when the config loads.
+# Rules are defined per folder list and apply to every account using it; an
+# account's own `actions:` (same format, inside its entry) replaces a list rule
+# of the same name, switches it off with `name: {enabled: false}`, or adds one.
 # A rule runs its steps when any `when` entry matches; all conditions within
 # an entry must hold. Each step runs at most once per mail, and never for mail
 # found by an account's first sync. Conditions:
@@ -111,11 +114,11 @@ accounts:
 #         (case-insensitive)
 # Steps: create_draft (reply written by Claude Haiku into the drafts folder,
 # optional instructions:). Planned: forward, ntfy.
-# Example for an account on the logistics list:
+# Example for the accounts on the logistics list:
 # actions:
-#   draft:
-#     accounts: [gmail-example]
-#     when:
-#       - {event: moved, to: zu_beantworten}
-#     do:
-#       - create_draft: {instructions: "Siezen. Unterschrift: Marcus Beispiel, Disposition"}
+#   logistics:
+#     draft:
+#       when:
+#         - {event: moved, to: zu_beantworten}
+#       do:
+#         - create_draft: {instructions: "Siezen. Unterschrift: Marcus Beispiel, Disposition"}

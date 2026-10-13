@@ -104,33 +104,6 @@ class ExchangeConnection(_Strict):
         return self
 
 
-class Account(_Strict):
-    id: str
-    provider: Literal["imap", "gmail", "exchange"]
-    email: str
-    user_first_name: str = "there"
-    folder_list: str
-    mailbox: MailboxLayout = MailboxLayout()
-    imap: Optional[ImapConnection] = None
-    gmail: Optional[GmailConnection] = None
-    exchange: Optional[ExchangeConnection] = None
-    # Set by parse_config, not in the YAML: why the account cannot be used.
-    unavailable: Optional[str] = None
-
-    @model_validator(mode="after")
-    def _connection_matches_provider(self):
-        for provider in ("imap", "gmail", "exchange"):
-            configured = getattr(self, provider) is not None
-            if provider == self.provider and not configured:
-                raise ValueError(f"account {self.id!r} needs a '{provider}:' section")
-            if provider != self.provider and configured:
-                raise ValueError(
-                    f"account {self.id!r} uses provider {self.provider!r} "
-                    f"but also has a '{provider}:' section"
-                )
-        return self
-
-
 class RuleTrigger(_Strict):
     """An event a rule reacts to; every condition given must hold."""
 
@@ -187,25 +160,61 @@ class RuleStep(_Strict):
 
 
 class ActionRule(_Strict):
-    """Runs its steps for an event that matches any of its `when` entries."""
+    """Runs its steps for an event that matches any of its `when` entries.
 
-    # Ids of the accounts the rule applies to; None: every account.
-    accounts: Optional[list[str]] = None
-    when: list[RuleTrigger] = Field(min_length=1)
-    do: list[RuleStep] = Field(min_length=1)
+    Defined per folder list (top-level `actions:`, keyed by list) for every
+    account on that list; an account's own `actions:` replaces a list rule of
+    the same name, switches it off with `enabled: false`, or adds rules.
+    """
+
+    enabled: bool = True
+    when: list[RuleTrigger] = []
+    do: list[RuleStep] = []
 
     @model_validator(mode="after")
-    def _one_step_per_kind(self):
+    def _complete(self):
+        if self.enabled and not (self.when and self.do):
+            raise ValueError("a rule needs 'when' and 'do' (or 'enabled: false')")
         kinds = [step.kind for step in self.do]
         if len(kinds) != len(set(kinds)):
             raise ValueError("each action may appear only once per rule")
         return self
 
 
+class Account(_Strict):
+    id: str
+    provider: Literal["imap", "gmail", "exchange"]
+    email: str
+    user_first_name: str = "there"
+    folder_list: str
+    mailbox: MailboxLayout = MailboxLayout()
+    imap: Optional[ImapConnection] = None
+    gmail: Optional[GmailConnection] = None
+    exchange: Optional[ExchangeConnection] = None
+    # Overrides and additions to the action rules of the account's folder list.
+    actions: dict[str, ActionRule] = {}
+    # Set by parse_config, not in the YAML: why the account cannot be used.
+    unavailable: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _connection_matches_provider(self):
+        for provider in ("imap", "gmail", "exchange"):
+            configured = getattr(self, provider) is not None
+            if provider == self.provider and not configured:
+                raise ValueError(f"account {self.id!r} needs a '{provider}:' section")
+            if provider != self.provider and configured:
+                raise ValueError(
+                    f"account {self.id!r} uses provider {self.provider!r} "
+                    f"but also has a '{provider}:' section"
+                )
+        return self
+
+
 class SmioConfig(_Strict):
     folder_lists: dict[str, dict[str, FolderRule]]
     accounts: list[Account]
-    actions: dict[str, ActionRule] = {}
+    # Action rules per folder list: list name -> rule name -> rule.
+    actions: dict[str, dict[str, ActionRule]] = {}
 
     @model_validator(mode="after")
     def _check_references(self):
@@ -228,19 +237,30 @@ class SmioConfig(_Strict):
                 raise ValueError(
                     f"account {account.id!r} uses unknown folder list {account.folder_list!r}"
                 )
-        for name, rule in self.actions.items():
-            unknown = set(rule.accounts or ()) - set(ids)
-            if unknown:
-                raise ValueError(f"action {name!r} names unknown account(s) {sorted(unknown)}")
-            targets = [a for a in self.accounts if rule.accounts is None or a.id in rule.accounts]
-            for trigger in rule.when:
-                for account in targets:
-                    if trigger.to is not None and trigger.to not in self.folder_lists[account.folder_list]:
+        unknown_lists = set(self.actions) - set(self.folder_lists)
+        if unknown_lists:
+            raise ValueError(f"actions for unknown folder list(s) {sorted(unknown_lists)}")
+        for account in self.accounts:
+            list_rules = self.actions.get(account.folder_list, {})
+            for name, rule in account.actions.items():
+                if not rule.enabled and name not in list_rules:
+                    raise ValueError(
+                        f"account {account.id!r} switches off unknown action {name!r}"
+                    )
+            folders = self.folder_lists[account.folder_list]
+            for name, rule in self.rules_for(account).items():
+                for trigger in rule.when:
+                    if trigger.to is not None and trigger.to not in folders:
                         raise ValueError(
-                            f"action {name!r}: folder list {account.folder_list!r} of account "
-                            f"{account.id!r} has no folder {trigger.to!r}"
+                            f"action {name!r} of account {account.id!r}: its folder list "
+                            f"{account.folder_list!r} has no folder {trigger.to!r}"
                         )
         return self
+
+    def rules_for(self, account):
+        """The account's action rules: its folder list's, overridden by its own."""
+        rules = {**self.actions.get(account.folder_list, {}), **account.actions}
+        return {name: rule for name, rule in rules.items() if rule.enabled}
 
     def labels(self, folder_list):
         """The model's labels for a folder list: its predicted folders and "other"."""
