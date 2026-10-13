@@ -47,6 +47,9 @@ class FolderRule(_Strict):
     # predicted and not a label of the model, so moving a mail there or out of
     # it teaches the classifier nothing.
     manual: bool = False
+    # Read delivery and shipment details (src/ai/extraction.py) from mails
+    # classified into this folder.
+    extract: bool = False
 
 
 class MailboxLayout(_Strict):

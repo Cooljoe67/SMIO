@@ -18,7 +18,7 @@ def process_unprocessed(account=Depends(requested_account), db: Session = Depend
     return {
         "batch_id": batch_id,
         "processed": len(results),
-        "ner_processed": sum(result["ner_executed"] for result in results),
+        "extracted": sum(result["extracted"] for result in results),
         "moved": sum("folder" in result for result in results),
         "failed": len(errors),
         "errors": errors,

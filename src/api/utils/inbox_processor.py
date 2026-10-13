@@ -4,10 +4,9 @@ from datetime import datetime, timezone
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 from src.ai import classifier
-from src.ai.email_metadata import extract_email_metadata, serialize_sources
-from src.ai.ner import amazon_sender_status, serialize_entities
+from src.ai import extraction
 from src.db.models import Email
-from src.api.utils.folder_rules import classification_folders, inbox_folder
+from src.api.utils.folder_rules import folder_rules, inbox_folder
 from src.mail.commands import (
     move_email_to_classification_folder,
     move_email_to_inbox,
@@ -24,7 +23,7 @@ def process_email_by_id(email_id: int, db: Session, account, batch_id: int = Non
     Full processing pipeline:
     - Load email
     - Classification
-    - NER (if delivery)
+    - Detail extraction (if the folder asks for it)
     - DB update
     - Return result dict
     """
@@ -39,22 +38,6 @@ def process_email_by_id(email_id: int, db: Session, account, batch_id: int = Non
         # SMIO's own mails never get here: the sync stores them as processed.
         # 2. Classification
         classification, confidence = classifier.predict_email(email, account.folder_list)
-        amazon_status = amazon_sender_status(
-            email.sender,
-            email.subject,
-            email.text,
-        )
-        if (
-            classification != "delivery"
-            and amazon_status is not None
-            and "delivery" in classification_folders(account)
-        ):
-            logger.info(
-                "Email %s: overriding classification %s to delivery from Amazon sender",
-                email_id,
-                classification,
-            )
-            classification = "delivery"
         logger.info(
             "Email %s classified as %s (confidence %.3f)",
             email_id,
@@ -70,32 +53,19 @@ def process_email_by_id(email_id: int, db: Session, account, batch_id: int = Non
             "email_id": email_id,
             "classification": classification,
             "confidence": confidence,
-            "ner_executed": False,
+            "extracted": False,
         }
 
-        # 3. Run NER only for delivery emails and persist all extracted fields.
-        if classification == "delivery":
-            fields, entities, sources = extract_email_metadata(
-                email.sender,
-                email.subject,
-                email.text,
-            )
-            logger.info("Email %s: NER found %d entities", email_id, len(entities))
-            if amazon_status is not None:
-                logger.info(
-                    "Email %s: Amazon sender %s provided status %s",
-                    email_id,
-                    email.sender,
-                    amazon_status,
-                )
-            for field_name, value in fields.items():
-                setattr(email, field_name, value)
-            email.ner_entities = serialize_entities(entities)
-            email.extraction_sources = serialize_sources(sources)
-            result.update(fields)
-            result["entities"] = entities
-            result["sources"] = sources
-            result["ner_executed"] = True
+        # 3. Read delivery and shipment details for folders that ask for them.
+        rule = folder_rules(account).get(classification)
+        if rule is not None and rule.extract:
+            try:
+                details = extraction.extract(email)
+            except extraction.ExtractionError as error:
+                logger.warning("Email %s: no details extracted: %s", email_id, error)
+            else:
+                result["details"] = extraction.apply(email, details)
+                result["extracted"] = True
 
         source_folder = email.folder
         destination = move_email_to_classification_folder(mailbox, email, account)

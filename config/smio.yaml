@@ -20,6 +20,7 @@ folder_lists:
   default:
     delivery:
       enabled: true
+      extract: true
       retention_days: null
       retention_days_unread: 20
     tech:
@@ -41,14 +42,14 @@ folder_lists:
   # by hand only: watched for moves, never predicted, not model labels.
   # Business mail is kept; only read newsletters are deleted after 10 days.
   logistics:
-    dringend: {folder: "1: Dringend"}
-    zu_beantworten: {folder: "2: Zu beantworten"}
+    dringend: {folder: "1: Dringend", extract: true}
+    zu_beantworten: {folder: "2: Zu beantworten", extract: true}
     zur_kenntnis: {folder: "3: Zur Kenntnis"}
-    statusmeldung: {folder: "4: Statusmeldung"}
+    statusmeldung: {folder: "4: Statusmeldung", extract: true}
     antwort_ausstehend: {folder: "5: Antwort ausstehend", manual: true}
     abgeschlossen: {folder: "6: Abgeschlossen", manual: true}
     marketing: {folder: "7: Marketing & Newsletter", retention_days: 10}
-    transportdokumente: {folder: "8: Transportdokumente"}
+    transportdokumente: {folder: "8: Transportdokumente", extract: true}
     rechnungen: {folder: "9: Rechnungen & Belege"}
 
 # An account id identifies its stored mails: never change it, or the inbox is

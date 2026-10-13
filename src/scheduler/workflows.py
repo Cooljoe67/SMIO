@@ -69,7 +69,7 @@ def _process_account(account, is_primary):
         "instructions": instruction_result,
         "batch_id": batch_id,
         "processed": len(results),
-        "ner_processed": sum(result["ner_executed"] for result in results),
+        "extracted": sum(result["extracted"] for result in results),
         "moved": sum("folder" in result for result in results),
         "failed": len(errors),
         "errors": errors,

@@ -83,8 +83,9 @@ class Email(Base):
     item_name = Column(String, nullable=True)
     delivery_date = Column(String, nullable=True)
     delivery_company = Column(String, nullable=True)
-    ner_entities = Column(Text, nullable=True)
-    extraction_sources = Column(Text, nullable=True)
+    # Extracted details without a column of their own, as JSON (src/ai/extraction.py).
+    extraction = Column(Text, nullable=True)
+    extracted_at = Column(DateTime, nullable=True)
 
     # Number of times this email has been processed.
     processed = Column(Integer, default=0, nullable=False)
