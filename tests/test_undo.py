@@ -63,7 +63,7 @@ class FakeMailBox:
 @pytest.fixture
 def mailbox(monkeypatch):
     fake = FakeMailBox()
-    monkeypatch.setattr(mail_imap, "MailBox", lambda host: fake)
+    monkeypatch.setattr(mail_imap, "MailBox", lambda host, **kwargs: fake)
     # UID verification has its own tests in test_mail_identity.py.
     monkeypatch.setattr(commands, "_verify_uid", lambda mailbox, email, folder: object())
     return fake

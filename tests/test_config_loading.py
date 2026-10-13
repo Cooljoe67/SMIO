@@ -184,7 +184,7 @@ def test_five_minute_workflow_reports_the_unavailable_account(monkeypatch):
     monkeypatch.setattr(workflows, "reload_config", lambda **kwargs: None)
     monkeypatch.setattr(workflows, "persist_database", lambda: False)
     monkeypatch.setattr(
-        mail_imap, "MailBox", lambda host: SimpleNamespace(login=lambda user, password: host)
+        mail_imap, "MailBox", lambda host, **kwargs: SimpleNamespace(login=lambda user, password: host)
     )
 
     def fetch_inbox(account):

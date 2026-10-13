@@ -112,7 +112,7 @@ class FakeServer:
         self.password = password
         self.logins = []
 
-    def __call__(self, host):
+    def __call__(self, host, **kwargs):
         return self
 
     def login(self, username, password):
@@ -132,7 +132,7 @@ def test_mailbox_logs_in_with_the_secret(monkeypatch):
 
 
 def test_empty_plain_password_is_refused(monkeypatch):
-    monkeypatch.setattr(mail_imap, "MailBox", lambda host: pytest.fail("connected"))
+    monkeypatch.setattr(mail_imap, "MailBox", lambda host, **kwargs: pytest.fail("connected"))
     account = config.parse_config(
         _account("imap", "host: imap.test, username: owner@test, password: ''")
     ).accounts[0]
