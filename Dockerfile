@@ -27,5 +27,4 @@ CMD ["sh", "-c", "exec uvicorn src.api.main:app --host 0.0.0.0 --port ${PORT:-80
 FROM runtime-base AS cloud-run
 
 FROM runtime-base AS local
-COPY --chown=smio:smio models/ner-smio ./models/ner-smio
 COPY --chown=smio:smio models/distilbert_deployed ./models/distilbert_deployed

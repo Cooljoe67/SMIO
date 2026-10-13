@@ -39,16 +39,6 @@ _stub(
     reload_models=lambda: ["default"],
 )
 _stub(
-    "src.ai.ner",
-    amazon_sender_status=lambda *args: None,
-    serialize_entities=lambda entities: "[]",
-)
-_stub(
-    "src.ai.email_metadata",
-    extract_email_metadata=lambda *args: ({}, [], {}),
-    serialize_sources=lambda sources: "{}",
-)
-_stub(
     "src.ai.retrain",
     restore_previous_model=lambda: {},
     retrain_if_due=lambda db, **kwargs: {},

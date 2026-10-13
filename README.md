@@ -2,7 +2,7 @@
 
 An AI-powered system that automatically analyzes, categorizes, and declutters your email inbox.
 
-SMIO connects to one or more mailboxes (IMAP or Gmail), classifies incoming mails with a fine-tuned DistilBERT model, moves them into the folders of a configurable folder list, extracts delivery details with a custom NER model, reacts to mail events with configurable action rules (for example, a reply draft written by Claude Haiku), sends you a daily plain-language summary, and retrains the classifier on your manual corrections.
+SMIO connects to one or more mailboxes (IMAP or Gmail), classifies incoming mails with a fine-tuned DistilBERT model, moves them into the folders of a configurable folder list, extracts shipment details with Claude Haiku, reacts to mail events with configurable action rules (for example, a reply draft written by Claude Haiku), sends you a daily plain-language summary, and retrains the classifier on your manual corrections.
 
 ---
 
@@ -10,7 +10,7 @@ SMIO connects to one or more mailboxes (IMAP or Gmail), classifies incoming mail
 
 - **AI-based email classification** — sorts mail into the folders of a configurable [folder list](#folder-lists), one fine-tuned DistilBERT model per list; mail that fits no folder stays in the inbox as `other`.
 - **Several accounts and providers** — IMAP and Gmail behind one [mailbox interface](#-how-it-works); each account uses one folder list. Exchange is planned.
-- **Delivery extraction** — for lists with a `delivery` folder, identifies tracking and order details with a token-classification NER model and rule-based fallbacks.
+- **Shipment extraction** — for folders with `extract: true`, Claude Haiku reads carrier, order and tracking numbers, dates, goods, quantities and places from the mail ([src/ai/extraction.py](src/ai/extraction.py)).
 - **Inbox automation** — files messages by folder, applies read/unread retention rules, records manual folder moves as corrections, and supports undo.
 - **Events and action rules** — every change of a mail (received, moved by you or by SMIO, removed, read) becomes an event; [action rules](#action-rules) react to them, for example with a reply draft written by Claude Haiku. Each action runs at most once per mail.
 - **Reply status** — Claude Haiku reads replies in a thread and updates the status of the mail they answer (to do, waiting for an answer, a date or a document, done).
@@ -87,7 +87,7 @@ flowchart TD
 
 1. **Sync** — each account's watched folders are read and reconciled, and retention moves old mail to the trash ([src/mail/sync.py](src/mail/sync.py), [src/mail/commands.py](src/mail/commands.py)).
 2. **Commands** — mails with a command are moved to the trash, then run ([src/api/utils/command_processor.py](src/api/utils/command_processor.py)).
-3. **Process** — new inbox mail is classified with the model of the account's folder list, NER runs for `delivery` mails, and the mail is moved into its folder ([src/api/utils/inbox_processor.py](src/api/utils/inbox_processor.py)).
+3. **Process** — new inbox mail is classified with the model of the account's folder list, shipment details are extracted for folders with `extract: true`, and the mail is moved into its folder ([src/api/utils/inbox_processor.py](src/api/utils/inbox_processor.py)).
 4. **Reply status** — Claude Haiku decides what a reply means for the mail it answers ([src/ai/reply_status.py](src/ai/reply_status.py)).
 5. **Actions** — configured rules run on the new events ([src/mail/rules.py](src/mail/rules.py)).
 6. **Summarize and retrain (daily)** — the logical day's snapshot is stored and its digest appended to the inbox. The model section and technical details appear only after a retraining ran in that period. Retraining starts once enough manual corrections have accumulated: it fine-tunes the classifier on a replay buffer (90% old data / 10% new corrections per class) and applies the macro-F1, paired-bootstrap and per-class recall gates on a fixed hold-out set, then mails the result. Automatic retraining covers the `default` list's model; models of other lists are trained with `scripts/train_distilbert_optuna.py --folder-list <list>` and uploaded to `models/classifier-<list>` in GCS.
@@ -99,7 +99,7 @@ flowchart TD
 ```text
 SMIO/
   src/
-    ai/                 # classification, NER, summaries, retraining
+    ai/                 # classification, extraction, summaries, retraining
     api/
       routers/          # inbox, mail sync, summary, scheduled jobs
       utils/            # email commands, folder rules, email delivery
@@ -111,31 +111,26 @@ SMIO/
   scripts/              # deployment, data import/export, training, maintenance
     deploy.ps1
     add_account.ps1
-    update_ner_model.py
     sync_database_with_gcs.py
     run_workflow.py
     backfill_summary_snapshots.py
     bootstrap_eval_holdout.py
     evaluate_classifier.py
-    export_ner_from_db.py
     export_training_data.py
     import_training_data.py
     test_classifier.py
     train_bert_classifier.py
     train_distilbert_hparam_cv.py
     train_distilbert_optuna.py
-    train_ner.py
   models/
     distilbert_deployed/       # model of the "default" folder list
     classifier-<list>/         # model of any other folder list
     distilbert_optuna/
     distilbert_candidate_*/
-    ner-smio/
   data/
     raw/
     labeled/
   training_data.jsonl
-  ner_training.jsonl
   Dockerfile
   requirements.txt
   requirements-runtime.txt
@@ -177,12 +172,11 @@ docker build -t smio:local .
 docker run --rm -p 8080:8080 --env-file .env smio:local
 ```
 
-The default `local` image includes the checked-out classifier and NER models. The
-Cloud Run target omits both models and loads them from GCS. Docker installs the
+The default `local` image includes the checked-out classifier model. The
+Cloud Run target omits it and loads the models from GCS. Docker installs the
 CPU-only `requirements-runtime.txt`; the full `requirements.txt` remains for local
-training and evaluation. Ensure the classifier prefix exists and upload the NER
-model with `-UpdateNerModel` on the first migration. The container serves the API
-at `http://localhost:8080`. Configure
+training and evaluation. Ensure the classifier prefix exists on the first
+migration. The container serves the API at `http://localhost:8080`. Configure
 Cloud Run environment variables through Secret Manager or service configuration; do
 not add `.env` to the image.
 
@@ -203,7 +197,6 @@ Google Cloud Storage is optional. For a local PC or Raspberry Pi, leave
 `GCS_BUCKET` unset. SMIO then uses the checked-out files directly:
 
 - classifier: `models/distilbert_deployed`
-- NER model: `models/ner-smio`
 - SQLite database: `./smio.db`
 - retraining state and candidates: `models/`
 
@@ -336,10 +329,6 @@ policy "domain restricted sharing" must allow Gmail's publisher as an exception.
 .\scripts\deploy.ps1
 ```
 
-Add `-UpdateNerModel` to upload `models/ner-smio` as a new immutable GCS release
-and deploy a Cloud Run revision pinned to it. Use `-NerModelDirectory` to choose a
-different trained model directory.
-
 Daily summaries are appended directly to the account's inbox. The deploy
 script reads `GCP_PROJECT_ID`, `GCP_REGION`, and `GCS_BUCKET` from `.env`;
 `GCP_SCHEDULER_LOCATION` is optional and defaults to `GCP_REGION`. Explicit
@@ -394,20 +383,6 @@ log entries as `smio-api-logs.txt`; the allowed count is 1–2000. Commands are
 moved to Trash before execution. If no completion is recorded within
 `SMIO_COMMAND_TIMEOUT_MINUTES` (15 minutes by default), the next five-minute job
 reports the timeout by email.
-
-### Replace only the NER model
-
-After training NER locally, upload it and update the Cloud Run service without
-rebuilding or pushing the Docker image:
-
-```powershell
-.\smio\Scripts\python.exe .\scripts\update_ner_model.py --model-dir .\models\ner-smio
-```
-
-The script validates the model files, uploads a timestamped release under
-`GCS_NER_MODEL_PREFIX`, updates `current.json`, and creates a new Cloud Run
-revision pinned to that release. If the service update fails, it restores the
-previous pointer.
 
 ### Edit the GCS-backed SQLite database
 
@@ -489,7 +464,6 @@ USER_FIRST_NAME=Example User
 # Optional GCS object locations
 # Cloud Run uses its service account through Application Default Credentials.
 GCS_CLASSIFIER_MODEL_PREFIX=models/distilbert_deployed
-GCS_NER_MODEL_PREFIX=models/ner-smio
 GCS_DATABASE_OBJECT=databases/smio.db
 # Folder lists and accounts; the service re-reads it on every workflow run.
 GCS_CONFIG_OBJECT=config/smio.yaml
@@ -518,7 +492,7 @@ in the GCS copy wait until it is fixed. Errors are logged.
 
 `.env` is loaded by every SMIO process, but only the deployed service (`K_SERVICE`
 set by Cloud Run) syncs its runtime state with GCS: the SQLite database, the config,
-the classifier and NER models, model archives and pending command state. Local scripts
+the classifier models, model archives and pending command state. Local scripts
 and a local server keep using `./smio.db`, the checked-out `config/smio.yaml` and the
 local `models/` even with `GCS_BUCKET` in `.env`, which `deploy.ps1`, `add_account.ps1`
 and `--publish` need. To run locally against production, set `SMIO_GCS=1` for that run,
@@ -601,6 +575,7 @@ folder_lists:
 - `enabled: false` — keeps the label, but its mails stay in the inbox.
 - `retention_days`, `retention_days_unread` — move read or unread mail older than that to the trash.
 - `manual: true` — a folder you file into by hand only: watched for moves (and action rules), never predicted and not a model label.
+- `extract: true` — Claude Haiku reads shipment details (carrier, order/tracking numbers, delivery and pickup dates, goods, quantity, pallets, weight, places) from mails the model files there; needs `ANTHROPIC_API_KEY`. Without the key, or if a call fails, the mail is sorted without details.
 
 ### Action rules
 
@@ -660,7 +635,7 @@ it loads, so an unknown folder, list or step is rejected.
 ## 📈 Roadmap
 
 **Done**
-- IMAP ingestion, classification, NER extraction
+- IMAP ingestion, classification, shipment extraction (Claude Haiku)
 - Folder-rule-based automated actions with retention cleanup
 - Manual-correction tracking + replay-buffer retraining with a fixed eval hold-out
 - Daily summary email

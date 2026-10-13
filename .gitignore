@@ -66,15 +66,11 @@ models/
 models/*/
 !models/distilbert_deployed/
 !models/distilbert_deployed/**
-!models/ner-smio/
-!models/ner-smio/**
-models/ner-smio/checkpoint-*/
 
 # ---------------------------------------------------------
 # MACHINE LEARNING: TRAINING DATA
 # ---------------------------------------------------------
 *.jsonl
-ner_training.jsonl
 training_data/
 datasets/
 

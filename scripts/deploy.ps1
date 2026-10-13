@@ -11,7 +11,6 @@ param(
     [string]$SummaryTimezone = "Europe/Berlin",
     [string]$GcsBucket = "",
     [string]$GcsModelPrefix = "models/distilbert_deployed",
-    [string]$GcsNerModelPrefix = "",
     [string]$GcsDatabaseObject = "databases/smio.db",
     [string]$GcsConfigObject = "",
     [string]$SchedulerLocation = "",
@@ -23,9 +22,7 @@ param(
     [string]$AnthropicApiKeySecret = "claude-api-key",
     [string]$GmailPubSubTopic = "smio-gmail",
     [string]$GmailPushSubscription = "smio-gmail-push",
-    [string]$GmailPushServiceAccount = "smio-gmail-push",
-    [switch]$UpdateNerModel,
-    [string]$NerModelDirectory = ".\models\ner-smio"
+    [string]$GmailPushServiceAccount = "smio-gmail-push"
 )
 
 $ErrorActionPreference = "Stop"
@@ -70,7 +67,6 @@ function Resolve-ConfigValue {
 $ProjectId = Resolve-ConfigValue $ProjectId "GCP_PROJECT_ID" $DotEnvValues
 $Region = Resolve-ConfigValue $Region "GCP_REGION" $DotEnvValues
 $GcsBucket = Resolve-ConfigValue $GcsBucket "GCS_BUCKET" $DotEnvValues
-$GcsNerModelPrefix = Resolve-ConfigValue $GcsNerModelPrefix "GCS_NER_MODEL_PREFIX" $DotEnvValues
 # The service and add_account.ps1 must use the same GCS copy of config/smio.yaml.
 $GcsConfigObject = Resolve-ConfigValue $GcsConfigObject "GCS_CONFIG_OBJECT" $DotEnvValues
 if ([string]::IsNullOrWhiteSpace($GcsConfigObject)) {
@@ -91,9 +87,6 @@ if ($CommandTimeoutMinutes -lt 1) {
 $SchedulerLocation = Resolve-ConfigValue $SchedulerLocation "GCP_SCHEDULER_LOCATION" $DotEnvValues
 if ([string]::IsNullOrWhiteSpace($SchedulerLocation)) {
     $SchedulerLocation = $Region
-}
-if ([string]::IsNullOrWhiteSpace($GcsNerModelPrefix)) {
-    $GcsNerModelPrefix = "models/ner-smio"
 }
 
 if ([string]::IsNullOrWhiteSpace($ProjectId) -or
@@ -495,36 +488,7 @@ if ($anthropicSecretExists) {
 }
 
 Write-Host "Deploying Cloud Run service..."
-$NerModelRevision = ""
-if ($UpdateNerModel) {
-    $pythonExecutable = Join-Path $PSScriptRoot "..\smio\Scripts\python.exe"
-    if (-not (Test-Path $pythonExecutable)) {
-        $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
-        if (-not $pythonCommand) {
-            throw "Python was not found. Activate the project environment or install Python."
-        }
-        $pythonExecutable = $pythonCommand.Source
-    }
-
-    Write-Host "Uploading NER model release from '$NerModelDirectory'..."
-    $revisionOutput = & $pythonExecutable (Join-Path $PSScriptRoot "update_ner_model.py") `
-        --model-dir $NerModelDirectory `
-        --bucket $GcsBucket `
-        --prefix $GcsNerModelPrefix `
-        --upload-only
-    if ($LASTEXITCODE -ne 0) {
-        throw "NER model upload failed with exit code $LASTEXITCODE"
-    }
-    $NerModelRevision = ($revisionOutput | Out-String).Trim()
-    if ($NerModelRevision -notmatch '^\d{8}T\d{12}Z$') {
-        throw "NER model upload returned an invalid revision identifier."
-    }
-}
-
-$deployEnvVars = "GOOGLE_CLOUD_PROJECT=$ProjectId,GCS_BUCKET=$GcsBucket,GCS_CLASSIFIER_MODEL_PREFIX=$GcsModelPrefix,GCS_NER_MODEL_PREFIX=$GcsNerModelPrefix,GCS_DATABASE_OBJECT=$GcsDatabaseObject,GCS_CONFIG_OBJECT=$GcsConfigObject,SMIO_SUMMARY_START_HOUR=$SummaryStartHour,SMIO_SUMMARY_TIMEZONE=$SummaryTimezone,SMIO_COMMAND_TIMEOUT_MINUTES=$CommandTimeoutMinutes,GMAIL_PUBSUB_TOPIC=projects/$ProjectId/topics/$GmailPubSubTopic"
-if ($NerModelRevision) {
-    $deployEnvVars += ",SMIO_NER_MODEL_REVISION=$NerModelRevision"
-}
+$deployEnvVars = "GOOGLE_CLOUD_PROJECT=$ProjectId,GCS_BUCKET=$GcsBucket,GCS_CLASSIFIER_MODEL_PREFIX=$GcsModelPrefix,GCS_DATABASE_OBJECT=$GcsDatabaseObject,GCS_CONFIG_OBJECT=$GcsConfigObject,SMIO_SUMMARY_START_HOUR=$SummaryStartHour,SMIO_SUMMARY_TIMEZONE=$SummaryTimezone,SMIO_COMMAND_TIMEOUT_MINUTES=$CommandTimeoutMinutes,GMAIL_PUBSUB_TOPIC=projects/$ProjectId/topics/$GmailPubSubTopic"
 $deployArguments = @(
     "run", "deploy", $ServiceName,
     "--image=$Image",
