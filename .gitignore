@@ -159,3 +159,6 @@ t1a-arbeitsblatt.tsv
 # Local config variant with a plain IMAP password reference
 config/smio.local.yaml
 smio.local.yaml
+
+run-result.json
+models/**/training_args.bin
