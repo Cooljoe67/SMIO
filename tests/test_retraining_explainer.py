@@ -145,18 +145,46 @@ def test_daily_summary_puts_plain_text_first_and_jargon_last():
 
     technical = lines.index("Technical details (for troubleshooting)")
     commands = lines.index("Email commands")
-    assert lines[0] == "Model update: new version in use"
+    assert lines[lines.index("Model") + 1] == "Model update: new version in use"
     assert commands < technical
     assert all("F1" not in line for line in lines[:commands])
     assert any("Macro F1" in line for line in lines[technical:])
     assert "Last model update: 06/10/2026 05:12" in lines
 
 
+def _html_summary(result, period_start="2026-10-06T00:00:00", period_end="2026-10-07T00:00:00"):
+    return {
+        "period_start": period_start,
+        "period_end": period_end,
+        "new_counts": {"delivery": 2, "other": 1},
+        "unread_counts": {"delivery": 1, "other": 0},
+        "removed_counts": {"delivery": 0, "other": 0},
+        "db": {"total_entries": 10, "pending_corrections": 3, "correction_threshold": 20, "retrain_due": False},
+        "deliveries": {"today_count": 0, "upcoming": []},
+        "retraining": _retraining(result),
+    }
+
+
+def test_without_a_retraining_in_the_period_only_the_commands_remain():
+    retraining = _retraining(_result())
+    later = ("2026-10-07T04:00:00", "2026-10-08T04:00:00")
+
+    assert daily_summary._retrained_during(retraining, "2026-10-06T00:00:00", "2026-10-07T00:00:00")
+    assert not daily_summary._retrained_during(retraining, *later)
+    lines = daily_summary._model_and_footer_lines(retraining, retrained=False)
+    output = daily_summary._format_html_summary(_html_summary(_result(), *later))
+
+    assert "Email commands" in lines and "Model" not in lines
+    assert not any("Technical" in line or "model update" in line.lower() for line in lines)
+    assert "<h2>Model</h2>" not in output and "Technical details" not in output
+    assert "Email commands" in output
+
+
 def test_daily_summary_html_renders_plain_and_technical_sections():
     result = _result(False, {"macro_f1_not_worse": False, "bootstrap_noninferior": True, "class_recall_guard": True})
     summary = {
-        "period_start": "2026-10-06T06:00:00",
-        "period_end": "2026-10-07T06:00:00",
+        "period_start": "2026-10-06T00:00:00",
+        "period_end": "2026-10-07T00:00:00",
         "new_counts": {"delivery": 2, "other": 1},
         "unread_counts": {"delivery": 1, "other": 0},
         "removed_counts": {"delivery": 0, "other": 0},

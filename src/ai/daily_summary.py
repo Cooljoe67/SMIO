@@ -89,16 +89,57 @@ def _format_run_time(value):
     return _format_datetime(parsed.replace(tzinfo=timezone.utc))
 
 
-def _model_and_footer_lines(retraining):
-    """Plain-text model section, email commands and technical details."""
+def _parse_run_time(value):
+    """A retraining run timestamp as naive UTC, or None."""
+    if not value:
+        return None
+    try:
+        return datetime.strptime(str(value), "%Y%m%d_%H%M%S")
+    except ValueError:
+        pass
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def _retrained_during(retraining, period_start, period_end):
+    """Whether the last retraining ran in the summary's period.
+
+    The daily workflow retrains right after sending a summary, so its run is
+    reported by the next one; a RETRAIN command's run by the summary after it.
+    """
+    run_at = _parse_run_time(retraining.get("last_run_at"))
+    if run_at is None:
+        return False
+    if isinstance(period_start, str):
+        period_start = datetime.fromisoformat(period_start)
+    if isinstance(period_end, str):
+        period_end = datetime.fromisoformat(period_end)
+    return period_start <= run_at < period_end
+
+
+# Headings that start the part of the message rebuilt when a summary is sent.
+FOOTER_HEADINGS = ("Model", "Email commands")
+
+
+def _model_and_footer_lines(retraining, retrained=True):
+    """Model section and technical details (only after a retraining in the
+    period), and the email commands."""
     metrics = retraining["last_metrics"]
-    lines = explanation_text_lines(explain_retraining(metrics))
-    lines.append(f"Last model update: {_format_run_time(retraining['last_run_at'])}")
-    lines.append(
-        f"New version last put in use: {_format_run_time(retraining['last_promoted_at'])}"
-    )
+    lines = []
+    if retrained:
+        lines.extend(("", "Model"))
+        lines.extend(explanation_text_lines(explain_retraining(metrics)))
+        lines.append(f"Last model update: {_format_run_time(retraining['last_run_at'])}")
+        lines.append(
+            f"New version last put in use: {_format_run_time(retraining['last_promoted_at'])}"
+        )
     lines.extend(_email_command_help_lines())
-    if metrics:
+    if retrained and metrics:
         lines.extend(("", "Technical details (for troubleshooting)"))
         lines.extend(f"- {line}" for line in technical_lines(metrics))
         lines.append(
@@ -347,8 +388,9 @@ def build_daily_summary(db, summary_date=None, persist=False, account=None):
             "- Delivered since last summary: "
             + ", ".join(deliveries["delivered_since_summary"])
         )
-    lines.extend(("", "Model"))
-    lines.extend(_model_and_footer_lines(retraining))
+    lines.extend(_model_and_footer_lines(
+        retraining, _retrained_during(retraining, period_start, period_end)
+    ))
 
     summary = {
         "summary_date": logical_date.isoformat(),
@@ -495,11 +537,17 @@ def stored_daily_summary(db, summary_date=None):
     summary = json.loads(snapshot.data_json)
     summary["retraining"] = _retraining_snapshot(db)
     message_lines = summary["message"].splitlines()
-    if "Model" in message_lines:
-        message_lines = message_lines[:message_lines.index("Model") + 1]
-    else:
-        message_lines.extend(("", "Model"))
-    message_lines.extend(_model_and_footer_lines(summary["retraining"]))
+    footer = next(
+        (index for index, line in enumerate(message_lines) if line in FOOTER_HEADINGS),
+        len(message_lines),
+    )
+    message_lines = message_lines[:footer]
+    while message_lines and not message_lines[-1].strip():
+        message_lines.pop()
+    message_lines.extend(_model_and_footer_lines(
+        summary["retraining"],
+        _retrained_during(summary["retraining"], *summary_period(summary["summary_date"])[1:]),
+    ))
     summary["message"] = "\n".join(message_lines)
     summary["html_message"] = _format_html_summary(summary)
     summary["sent_at"] = snapshot.sent_at.isoformat() if snapshot.sent_at else None
@@ -574,6 +622,9 @@ def _format_html_summary(summary):
             "</tr>"
         )
     metrics = summary["retraining"]["last_metrics"]
+    retrained = _retrained_during(
+        summary["retraining"], summary["period_start"], summary["period_end"]
+    )
     model_html = explanation_html(explain_retraining(metrics))
     technical_items = "".join(
         f"<li>{number(line)}</li>" for line in (technical_lines(metrics) if metrics else [])
@@ -619,6 +670,20 @@ def _format_html_summary(summary):
             f"<td>{'promoted' if entry.get('promoted') else 'kept as candidate'}</td>"
             "</tr>"
         )
+    # Only a retraining in the summary's period is news.
+    model_section = f'''<h2>Model</h2>
+{model_html}
+<p style="color:#667085;font-size:13px">Last model update: {number(_format_run_time(summary['retraining']['last_run_at']))}<br>
+New version last put in use: {number(_format_run_time(summary['retraining']['last_promoted_at']))}</p>
+<h3 style="font-size:15px;color:#173f5f">Recent model updates</h3>
+<table style="width:100%;border-collapse:collapse"><tr><th align="left">Date</th><th align="left">Result</th><th align="left">Why</th><th align="left">Sorted correctly</th></tr>{''.join(update_rows) or '<tr><td colspan="4">No model updates yet.</td></tr>'}</table>
+''' if retrained else ""
+    technical_section = f'''<div style="color:#667085;font-size:12px;margin-top:28px;border-top:1px solid #e5e9ed">
+<h3 style="font-size:13px;color:#667085">Technical details (for troubleshooting)</h3>
+<ul>{technical_items or '<li>No retraining metrics available yet.</li>'}<li>Training duration: {number(training_duration_text)}</li></ul>
+<table style="width:100%;border-collapse:collapse"><tr><th align="left">Run</th><th align="left">Holdout</th><th align="left">Accuracy</th><th align="left">Recall</th><th align="left">F1 baseline -> candidate</th><th align="left">Delta / 95% CI</th><th align="left">Duration</th><th align="left">Status</th></tr>{''.join(history_rows) or '<tr><td colspan="8">No retraining runs found.</td></tr>'}</table>
+</div>
+''' if retrained else ""
     return f"""<!doctype html>
 <html><body style="margin:0;background:#f4f6f8;color:#17212b;font-family:Arial,sans-serif">
 <div style="max-width:720px;margin:0 auto;padding:28px 18px">
@@ -639,13 +704,7 @@ def _format_html_summary(summary):
 <h2>Deliveries</h2>
 <p>Due today: <b>{number(summary['deliveries']['today_count'])}</b></p>
 <table style="width:100%;border-collapse:collapse"><tr><th align="left">Date</th><th align="left">Item</th><th align="left">Company</th><th align="left">Status</th></tr>{''.join(delivery_rows) or '<tr><td colspan="4">No upcoming deliveries found.</td></tr>'}</table>
-<h2>Model</h2>
-{model_html}
-<p style="color:#667085;font-size:13px">Last model update: {number(_format_run_time(summary['retraining']['last_run_at']))}<br>
-New version last put in use: {number(_format_run_time(summary['retraining']['last_promoted_at']))}</p>
-<h3 style="font-size:15px;color:#173f5f">Recent model updates</h3>
-<table style="width:100%;border-collapse:collapse"><tr><th align="left">Date</th><th align="left">Result</th><th align="left">Why</th><th align="left">Sorted correctly</th></tr>{''.join(update_rows) or '<tr><td colspan="4">No model updates yet.</td></tr>'}</table>
-<h3 style="font-size:15px;color:#173f5f">Email commands</h3>
+{model_section}<h3 style="font-size:15px;color:#173f5f">Email commands</h3>
 <p>Reply to this summary with one command on the first line.<br></p>
 <ul><li><b>UNDO [n]</b>: restore the mails of the last n processing batches (default 1, max 20) to INBOX.</li>
 <li><b>RETRAIN</b>: force a retraining attempt; an evaluation holdout is required.</li>
@@ -653,11 +712,6 @@ New version last put in use: {number(_format_run_time(summary['retraining']['las
 <li><b>RESTORE MODEL</b>: restore the replaced model if its one-week backup is available.</li>
 <li><b>LOGS &lt;1-2000&gt;</b>: append recent Cloud Run API logs as a text attachment.</li>
 <li><b>SUMMARY</b>: send an on-demand summary.</li></ul>
-<div style="color:#667085;font-size:12px;margin-top:28px;border-top:1px solid #e5e9ed">
-<h3 style="font-size:13px;color:#667085">Technical details (for troubleshooting)</h3>
-<ul>{technical_items or '<li>No retraining metrics available yet.</li>'}<li>Training duration: {number(training_duration_text)}</li></ul>
-<table style="width:100%;border-collapse:collapse"><tr><th align="left">Run</th><th align="left">Holdout</th><th align="left">Accuracy</th><th align="left">Recall</th><th align="left">F1 baseline -> candidate</th><th align="left">Delta / 95% CI</th><th align="left">Duration</th><th align="left">Status</th></tr>{''.join(history_rows) or '<tr><td colspan="8">No retraining runs found.</td></tr>'}</table>
-</div>
-</div></div>
+{technical_section}</div></div>
 <style>h2{{font-size:18px;margin:22px 0 10px;color:#173f5f}}td,th{{padding:8px 6px;border-bottom:1px solid #e5e9ed;font-size:14px}}</style>
 </body></html>"""
