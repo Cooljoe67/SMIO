@@ -25,6 +25,10 @@ def uploads(tmp_path, monkeypatch):
     monkeypatch.setattr(database.gcs, "enabled", lambda: True)
     monkeypatch.setenv("K_SERVICE", "smio")
     monkeypatch.setattr(workflows, "reload_config", lambda **kwargs: None)
+    # The workflow lease and refresh have their own tests (test_workflow_lease.py).
+    monkeypatch.setattr(database.gcs, "acquire_lease", lambda *args: 1)
+    monkeypatch.setattr(database.gcs, "release_lease", lambda *args: None)
+    monkeypatch.setattr(workflows, "refresh_database", lambda: False)
     monkeypatch.setattr(
         database.gcs,
         "upload_file",

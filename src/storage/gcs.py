@@ -137,3 +137,85 @@ def delete_directory(prefix):
     for blob in blobs:
         blob.delete()
     return len(blobs)
+
+# Versioned objects: every GCS object has a generation that changes with each
+# write. Writing "only if the generation is still N" lets two service
+# instances (e.g. the old and new revision during a deploy) share an object
+# without overwriting each other.
+
+
+class StaleObject(RuntimeError):
+    """The object changed in GCS since the generation the caller knew."""
+
+
+def generation(object_name):
+    """The object's current generation, or None if it does not exist."""
+    blob = _bucket().get_blob(object_name)
+    return blob.generation if blob else None
+
+
+def download_versioned(object_name, destination):
+    """Replace destination with the object; returns its generation, or None if
+    it does not exist. The file is swapped in whole, never half-written."""
+    blob = _bucket().get_blob(object_name)
+    if blob is None:
+        return None
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    partial = destination.with_name(destination.name + ".download")
+    blob.download_to_filename(partial, if_generation_match=blob.generation)
+    os.replace(partial, destination)
+    return blob.generation
+
+
+def upload_versioned(source, object_name, expected_generation):
+    """Upload unless the object changed since expected_generation (0: must not
+    exist yet); returns the new generation or raises StaleObject."""
+    from google.api_core.exceptions import PreconditionFailed
+
+    blob = _bucket().blob(object_name)
+    try:
+        blob.upload_from_filename(source, if_generation_match=expected_generation)
+    except PreconditionFailed as error:
+        raise StaleObject(object_name) from error
+    return blob.generation
+
+
+def acquire_lease(object_name, holder, seconds):
+    """Take a lease held in an object; its generation if taken, None if another
+    holder's lease has not expired. An expired lease is taken over."""
+    import json
+    import time
+
+    from google.api_core.exceptions import PreconditionFailed
+
+    now = time.time()
+    body = json.dumps({"holder": holder, "expires": now + seconds})
+    blob = _bucket().blob(object_name)
+    current = _bucket().get_blob(object_name)
+    if current is not None:
+        try:
+            expires = float(json.loads(current.download_as_text()).get("expires", 0))
+        except (ValueError, AttributeError):
+            expires = 0
+        if expires > now:
+            return None
+    try:
+        blob.upload_from_string(
+            body, content_type="application/json",
+            if_generation_match=current.generation if current else 0,
+        )
+    except PreconditionFailed:
+        # Someone else took it between the read and the write.
+        return None
+    return blob.generation
+
+
+def release_lease(object_name, lease_generation):
+    """Give a lease back, unless it expired and was taken over meanwhile."""
+    from google.api_core.exceptions import NotFound, PreconditionFailed
+
+    try:
+        _bucket().blob(object_name).delete(if_generation_match=lease_generation)
+    except (NotFound, PreconditionFailed):
+        pass

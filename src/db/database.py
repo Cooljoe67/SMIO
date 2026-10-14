@@ -1,5 +1,6 @@
 import atexit
 import json
+import logging
 import os
 import threading
 from datetime import datetime
@@ -10,6 +11,8 @@ from sqlalchemy.orm import sessionmaker
 
 from src.config import primary_account
 from src.storage import gcs
+
+logger = logging.getLogger(__name__)
 
 
 DATABASE_PATH = Path(os.getenv("SQLITE_DB_PATH", "./smio.db"))
@@ -36,9 +39,14 @@ def _syncs_with_gcs():
     return gcs.syncs() and USING_SQLITE
 
 
+# Generation of the GCS database this copy was loaded from or last published as
+# (gcs.upload_versioned); None: not known, publish unconditionally.
+_published_generation = None
+
 if _syncs_with_gcs():
-    if not gcs.download_file(DATABASE_GCS_OBJECT, DATABASE_PATH) and DATABASE_PATH.exists():
-        gcs.upload_file(DATABASE_PATH, DATABASE_GCS_OBJECT)
+    _published_generation = gcs.download_versioned(DATABASE_GCS_OBJECT, DATABASE_PATH)
+    if _published_generation is None and DATABASE_PATH.exists():
+        _published_generation = gcs.upload_versioned(DATABASE_PATH, DATABASE_GCS_OBJECT, 0)
     _published_signature = _database_signature()
     if not os.getenv("K_SERVICE"):
         # The service publishes after each workflow and request; an opted-in
@@ -58,8 +66,8 @@ def persist_database():
     Called once at the end of each workflow and request rather than after every
     commit: each upload sends the whole file. Returns whether it uploaded.
     """
-    global _published_signature
-    if not _syncs_with_gcs():
+    global _published_signature, _published_generation
+    if not _syncs_with_gcs() or _publishing_held:
         return False
     with _publish_lock:
         # Read the signature before uploading so a write during the upload is
@@ -67,9 +75,67 @@ def persist_database():
         signature = _database_signature()
         if signature is None or signature == _published_signature:
             return False
-        gcs.upload_file(DATABASE_PATH, DATABASE_GCS_OBJECT)
+        if _published_generation is None:
+            gcs.upload_file(DATABASE_PATH, DATABASE_GCS_OBJECT)
+        else:
+            try:
+                _published_generation = gcs.upload_versioned(
+                    DATABASE_PATH, DATABASE_GCS_OBJECT, _published_generation
+                )
+            except gcs.StaleObject:
+                # Another instance published in between: keep its database;
+                # refresh_database() loads it and this copy's changes are lost.
+                logger.error(
+                    "Database in GCS changed since it was loaded; not overwriting it"
+                )
+                return False
         _published_signature = signature
         return True
+
+
+def refresh_database():
+    """Load the GCS database if another instance published it since this copy
+    was loaded. Call only while no session is open (at the start of a workflow);
+    returns whether it reloaded."""
+    global _published_generation, _published_signature
+    if not _syncs_with_gcs() or _published_generation is None:
+        return False
+    with _publish_lock:
+        if gcs.generation(DATABASE_GCS_OBJECT) == _published_generation:
+            return False
+        # Close pooled connections so new sessions open the replaced file.
+        engine.dispose()
+        _published_generation = gcs.download_versioned(DATABASE_GCS_OBJECT, DATABASE_PATH)
+        _published_signature = _database_signature()
+    logger.warning("Loaded the database another instance published")
+    # It may come from an older revision that lacks this one's migrations.
+    migrate()
+    return True
+
+
+# Set while migrate() runs: the migrations below publish their own changes,
+# but at startup that must wait for the workflow lease
+# (workflows.publish_startup_changes).
+_publishing_held = False
+
+
+def migrate():
+    """Bring the local database to this revision's schema and data; safe to repeat."""
+    global _publishing_held
+    from src.db.models import Base
+
+    _publishing_held = True
+    try:
+        Base.metadata.create_all(bind=engine)
+        ensure_email_columns()
+        ensure_action_claims_per_mail()
+        ensure_summary_snapshot_columns()
+        backfill_retrain_runs()
+        backfill_fingerprints()
+        requeue_own_address_mails()
+        forget_deploy_echo_corrections()
+    finally:
+        _publishing_held = False
 
 
 def ensure_email_columns():

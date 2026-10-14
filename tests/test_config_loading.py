@@ -361,6 +361,9 @@ def test_service_starts_on_the_bundled_file_without_accounts_only_in_gcs(
     engine = _database_with_accounts(tmp_path, "primary", "second")
     monkeypatch.setattr(database, "engine", engine)
     monkeypatch.setattr(workflows, "persist_database", lambda: False)
+    monkeypatch.setattr(workflows, "refresh_database", lambda: False)
+    monkeypatch.setattr(gcs, "acquire_lease", lambda *args: 1)
+    monkeypatch.setattr(gcs, "release_lease", lambda *args: None)
     monkeypatch.setenv("K_SERVICE", "smio")
     bucket[config.CONFIG_GCS_OBJECT] = gcs_copy
 

@@ -1,9 +1,10 @@
 """Cloud Scheduler routines for the single-instance SMIO service."""
 
-import logging
-from threading import Lock
-
 import json
+import logging
+import os
+import uuid
+from threading import Lock
 
 from src.ai.daily_summary import (
     gather_daily_summary,
@@ -20,11 +21,38 @@ from src.api.utils.inbox_processor import process_unprocessed_emails
 from src.api.utils.mailer import append_summary_to_inbox
 from src.api.utils.reply_tracking import update_statuses_from_replies
 from src.config import get_config, reload_config, require_stored_account_ids
-from src.db.database import SessionLocal, persist_database
+from src.db.database import SessionLocal, persist_database, refresh_database
 from src.db.models import MailSyncState, SummarySnapshot
+from src.storage import gcs
 
 logger = logging.getLogger(__name__)
 _workflow_lock = Lock()
+
+# Cloud Run runs one instance, but during a deploy the old and the new revision
+# overlap, each with its own copy of the database. A lease in GCS lets only one
+# of them run a workflow; the other skips (a Gmail push gets 503 and comes
+# again). It expires after the longest request Cloud Run allows (--timeout), so
+# a crashed holder blocks the workflows for at most that long.
+LEASE_OBJECT = os.getenv("SMIO_WORKFLOW_LEASE_OBJECT", "locks/workflow.json")
+LEASE_SECONDS = int(os.getenv("SMIO_WORKFLOW_LEASE_SECONDS", "3600"))
+_HOLDER = f"{os.getenv('K_REVISION', 'local')}/{uuid.uuid4().hex[:8]}"
+
+
+def publish_startup_changes():
+    """Publish what the startup migrations changed, under the lease: during a
+    deploy the old revision may still be running a workflow on the database."""
+    if not gcs.syncs():
+        return False
+    lease = gcs.acquire_lease(LEASE_OBJECT, _HOLDER, LEASE_SECONDS)
+    if lease is None:
+        # The first workflow publishes them, after loading the other
+        # instance's database and migrating it again.
+        logger.warning("Startup changes stay local: another instance runs a workflow")
+        return False
+    try:
+        return persist_database()
+    finally:
+        gcs.release_lease(LEASE_OBJECT, lease)
 
 
 def _run_exclusively(name, routine):
@@ -32,7 +60,15 @@ def _run_exclusively(name, routine):
         logger.warning("%s skipped because another workflow is running", name)
         return {"skipped": True, "reason": "workflow_in_progress"}
 
+    lease = None
     try:
+        if gcs.syncs():
+            lease = gcs.acquire_lease(LEASE_OBJECT, _HOLDER, LEASE_SECONDS)
+            if lease is None:
+                logger.warning("%s skipped because another instance runs a workflow", name)
+                return {"skipped": True, "reason": "workflow_in_progress"}
+            # The other instance may have published since this copy was loaded.
+            refresh_database()
         try:
             # Pick up folder/account changes made in GCS without a redeploy,
             # but never one that drops the account id of stored mails.
@@ -48,6 +84,12 @@ def _run_exclusively(name, routine):
         persist_database()
         return result
     finally:
+        if lease is not None:
+            try:
+                gcs.release_lease(LEASE_OBJECT, lease)
+            except Exception:
+                # It expires on its own.
+                logger.exception("Could not release the workflow lease")
         _workflow_lock.release()
 
 

@@ -4,30 +4,13 @@ from fastapi import FastAPI
 from .middleware import publish_database_changes
 from .routers import events, inbox, jobs, mail, summary
 
-from src.db.database import (
-    backfill_fingerprints,
-    backfill_retrain_runs,
-    engine,
-    ensure_action_claims_per_mail,
-    ensure_email_columns,
-    forget_deploy_echo_corrections,
-    requeue_own_address_mails,
-    ensure_summary_snapshot_columns,
-    persist_database,
-)
-from src.db.models import Base
+from src.db.database import migrate
+from src.scheduler.workflows import publish_startup_changes
 
 logging.basicConfig(level=logging.INFO)
 
-Base.metadata.create_all(bind=engine)
-ensure_email_columns()
-ensure_action_claims_per_mail()
-ensure_summary_snapshot_columns()
-backfill_retrain_runs()
-backfill_fingerprints()
-requeue_own_address_mails()
-forget_deploy_echo_corrections()
-persist_database()
+migrate()
+publish_startup_changes()
 
 
 app = FastAPI(

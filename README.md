@@ -483,6 +483,7 @@ reply drafts; without it, replies wait and draft actions fail. Optional tuning:
 | `SMIO_STATUS_MODEL`, `SMIO_DRAFT_MODEL` | `claude-haiku-4-5` | Claude models for reply status and drafts |
 | `SMIO_DRAFT_MAX_AGE_DAYS` | `7` | No draft when SMIO itself sorts a mail older than this; a mail you move yourself always gets one |
 | `SMIO_DRAFT_MAX_PER_RUN` | `10` | Drafts per run; the rest follow in the next runs |
+| `SMIO_WORKFLOW_LEASE_SECONDS` | `3600` | How long a workflow lease in GCS (`locks/workflow.json`) lasts; it keeps two revisions from running a workflow at once during a deploy |
 
 Folder lists (one classifier model per list), per-folder on/off switches, retention, mail accounts and action rules are configured in [config/smio.yaml](config/smio.yaml).
 The deployed service reads its copy from GCS (`GCS_CONFIG_OBJECT`) into memory at
