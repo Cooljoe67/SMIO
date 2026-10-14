@@ -10,6 +10,7 @@ from src.db.database import (
     engine,
     ensure_action_claims_per_mail,
     ensure_email_columns,
+    forget_deploy_echo_corrections,
     requeue_own_address_mails,
     ensure_summary_snapshot_columns,
     persist_database,
@@ -25,6 +26,7 @@ ensure_summary_snapshot_columns()
 backfill_retrain_runs()
 backfill_fingerprints()
 requeue_own_address_mails()
+forget_deploy_echo_corrections()
 persist_database()
 
 

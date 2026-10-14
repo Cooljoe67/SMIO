@@ -2,6 +2,7 @@ import atexit
 import json
 import os
 import threading
+from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import create_engine, inspect, text
@@ -234,6 +235,54 @@ def backfill_fingerprints():
         if emails:
             db.commit()
         return len(emails)
+    finally:
+        db.close()
+
+
+# The deploy of 2026-10-14 ran the old and the new revision side by side, each
+# on its own copy of the database: the new one saw the old one's sorting as the
+# user's moves and stored the model's own predictions as corrections.
+DEPLOY_ECHO_WINDOW = (datetime(2026, 10, 14, 11, 50), datetime(2026, 10, 14, 12, 10))
+
+
+def forget_deploy_echo_corrections():
+    """Drop the corrections the 2026-10-14 deploy took for the user's; safe to repeat.
+
+    Only mails whose last move was such an echo (a "user" move of a label's
+    first read, inside the window) and not yet used for retraining.
+    """
+    from src.db.models import Email, MailEvent
+
+    db = SessionLocal()
+    try:
+        echoes = db.query(MailEvent).filter(
+            MailEvent.event_type == "moved",
+            MailEvent.source == "user",
+            MailEvent.initial.is_(True),
+            MailEvent.occurred_at >= DEPLOY_ECHO_WINDOW[0],
+            MailEvent.occurred_at < DEPLOY_ECHO_WINDOW[1],
+        ).all()
+        forgotten = 0
+        for echo in echoes:
+            later_move = db.query(MailEvent.id).filter(
+                MailEvent.email_id == echo.email_id,
+                MailEvent.event_type == "moved",
+                MailEvent.seq > echo.seq,
+            ).first()
+            email = db.get(Email, echo.email_id)
+            if (
+                later_move is None
+                and email is not None
+                and email.classification_source == "imap_folder"
+                and email.true_label is not None
+                and email.retrain_batch is None
+            ):
+                email.true_label = None
+                email.classification_source = "model"
+                forgotten += 1
+        if forgotten:
+            db.commit()
+        return forgotten
     finally:
         db.close()
 
