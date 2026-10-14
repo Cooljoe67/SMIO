@@ -24,16 +24,24 @@ class FakeClient:
         return SimpleNamespace(parsed_output=self.parsed, stop_reason=self.stop_reason)
 
 
-DETAILS = extraction.Extraction(
-    delivery_company="DB Schenker",
-    tracking_id="SCH123",
-    delivery_status="IN_TRANSIT",
-    delivery_date="2026-10-15",
-    item_name="Kugellager 6204-2RS",
-    quantity="40 Kartons",
-    pallets=2,
-    destination="Hamburg",
-)
+DETAILS = extraction.Extraction(**{
+    **{field: "" for field in extraction.Extraction.model_fields},
+    "delivery_company": "DB Schenker",
+    "tracking_id": "SCH123",
+    "delivery_status": "IN_TRANSIT",
+    "delivery_date": "2026-10-15",
+    "item_name": "Kugellager 6204-2RS",
+    "quantity": "40 Kartons",
+    "pallets": "2",
+    "destination": "Hamburg",
+})
+
+
+def test_the_schema_has_no_optional_or_nullable_fields():
+    # The API rejected 14 optional, nullable fields with "Schema is too complex".
+    schema = extraction.Extraction.model_json_schema()
+    assert set(schema["required"]) == set(schema["properties"])
+    assert all("anyOf" not in prop for prop in schema["properties"].values())
 
 
 @pytest.fixture
@@ -54,7 +62,9 @@ def test_shared_fields_get_columns_and_the_rest_goes_to_json(haiku):
     )
     assert (email.delivery_date, email.item_name) == ("2026-10-15", "Kugellager 6204-2RS")
     extras = json.loads(email.extraction)
-    assert (extras["quantity"], extras["pallets"], extras["destination"]) == ("40 Kartons", 2, "Hamburg")
+    assert (extras["quantity"], extras["pallets"], extras["destination"]) == ("40 Kartons", "2", "Hamburg")
+    # Fields the mail does not give are stored as missing, not as "".
+    assert email.order_id is None and extras["origin"] is None
     assert email.extracted_at is not None and stored["tracking_id"] == "SCH123"
     assert "<mail>" in haiku.calls[0]["messages"][0]["content"]
 
