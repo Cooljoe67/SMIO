@@ -14,10 +14,17 @@ from src.api.utils.folder_rules import folder_path
 from src.config import get_config
 from src.db.models import Email
 
-from .drafts import create_reply_draft
+from . import drafts
 
 # Step kind (a key of src.config.RuleStep) -> run(db, event, options).
-STEPS = {"create_draft": create_reply_draft}
+STEPS = {"create_draft": drafts.create_reply_draft}
+
+
+def per_run_limit(action_name):
+    """(kind, limit) if runs of this action are capped per dispatch, else None."""
+    if action_name.startswith("rule:") and action_name.endswith(":create_draft"):
+        return "create_draft", drafts.MAX_PER_RUN
+    return None
 
 
 def _sender_matches(pattern, sender):

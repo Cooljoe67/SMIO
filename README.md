@@ -481,6 +481,8 @@ reply drafts; without it, replies wait and draft actions fail. Optional tuning:
 | `SMIO_GMAIL_IMPORT_DAYS` | 30 | Days of existing Gmail inbox mail imported by the first sync |
 | `SMIO_MIN_CORRECTIONS` | 20 | Corrections that make a retraining due |
 | `SMIO_STATUS_MODEL`, `SMIO_DRAFT_MODEL` | `claude-haiku-4-5` | Claude models for reply status and drafts |
+| `SMIO_DRAFT_MAX_AGE_DAYS` | `7` | No draft when SMIO itself sorts a mail older than this; a mail you move yourself always gets one |
+| `SMIO_DRAFT_MAX_PER_RUN` | `10` | Drafts per run; the rest follow in the next runs |
 
 Folder lists (one classifier model per list), per-folder on/off switches, retention, mail accounts and action rules are configured in [config/smio.yaml](config/smio.yaml).
 The deployed service reads its copy from GCS (`GCS_CONFIG_OBJECT`) into memory at
@@ -609,7 +611,10 @@ or `system`; omitted: either), `to` (a folder of the list, moved events only),
 (case-insensitive). Steps: `create_draft` writes a reply with Claude Haiku into the
 account's drafts folder, in the mail's thread and language; facts the mail does not
 give become placeholders such as `[Liefertermin]`, and the account's
-`user_first_name` signs it. Planned: `forward`, `ntfy`. The config is checked when
+`user_first_name` signs it. A mail you move yourself always gets a draft; when
+SMIO sorts it, mails older than `SMIO_DRAFT_MAX_AGE_DAYS` or already answered get
+none, so a backlog sorted at once does not fill the drafts folder. At most
+`SMIO_DRAFT_MAX_PER_RUN` drafts are written per run. Planned: `forward`, `ntfy`. The config is checked when
 it loads, so an unknown folder, list or step is rejected.
 
 ---

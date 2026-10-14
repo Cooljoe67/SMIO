@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from email import message_from_bytes
 from email.header import decode_header, make_header
 from types import SimpleNamespace
@@ -129,6 +130,22 @@ def drafted(monkeypatch, server):
     return mailbox
 
 
+RECENT = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1)
+
+
+def _sort_new_mails(db, mailbox, monkeypatch, *messages):
+    """Deliver messages after the first read and let the model sort them into tech."""
+    _sync()
+    for message in messages:
+        mailbox.deliver("INBOX", message)
+    _sync()
+    _predict(monkeypatch, mailbox, "tech")
+    monkeypatch.setattr(
+        inbox_processor, "open_mailbox", lambda account: ImapMailbox(account, connection=mailbox)
+    )
+    inbox_processor.process_unprocessed_emails(db, primary_account())
+
+
 def _user_move(mailbox, folder):
     mailbox.current = "INBOX" if mailbox.folders["INBOX"] else mailbox.current
     mailbox.move([mailbox.folders[mailbox.current][0].uid], folder)
@@ -171,7 +188,7 @@ def test_a_system_only_rule_ignores_the_users_move(db, rules, drafted):
 
 def test_a_rule_fires_when_the_model_sorts_the_mail(db, rules, drafted, monkeypatch):
     _sync()
-    drafted.deliver("INBOX", _message(None, message_id="<new@test>", subject="Neu"))
+    drafted.deliver("INBOX", _message(None, message_id="<new@test>", subject="Neu", date=RECENT))
     _sync()
     _predict(monkeypatch, drafted, "tech")
     monkeypatch.setattr(
@@ -270,3 +287,44 @@ def test_the_accounts_override_is_what_runs(db, drafted, monkeypatch):
     events.dispatch(db, primary_account())
 
     assert drafted.calls == [("Lieferung", "Marcus", "Immer duzen")]
+
+
+def test_the_model_sorting_old_or_answered_mail_writes_no_draft(db, rules, drafted, monkeypatch):
+    _sort_new_mails(
+        db, drafted, monkeypatch,
+        _message(None, message_id="<old@test>", subject="Alt", date=RECENT - timedelta(days=30)),
+        _message(None, message_id="<done@test>", subject="Beantwortet", date=RECENT),
+    )
+    answered = db.query(Email).filter(Email.subject == "Beantwortet").one()
+    db.add(Email(account="primary", subject="AW: Beantwortet", direction="OUTBOUND",
+                 reply_to_id=answered.id))
+    db.commit()
+
+    events.dispatch(db, primary_account())
+
+    assert drafted.calls == []
+
+
+def test_drafts_over_the_per_run_cap_wait_for_the_next_run(db, rules, drafted, monkeypatch):
+    monkeypatch.setattr(drafts, "MAX_PER_RUN", 1)
+    _sort_new_mails(
+        db, drafted, monkeypatch,
+        _message(None, message_id="<n1@test>", subject="Eins", date=RECENT),
+        _message(None, message_id="<n2@test>", subject="Zwei", date=RECENT),
+    )
+
+    first = events.dispatch(db, primary_account())
+    second = events.dispatch(db, primary_account())
+
+    assert (first["done"], first["deferred"], second["done"]) == (1, 1, 1)
+    assert sorted(call[0] for call in drafted.calls) == ["Eins", "Zwei"]
+
+
+def test_no_drafts_folder_fails_before_haiku_is_paid(db, rules, drafted, monkeypatch):
+    monkeypatch.setattr(ImapMailbox, "drafts_folder", lambda self: None)
+    _sync()
+    _user_move(drafted, "INBOX/delivery")
+    _sync()
+
+    assert events.dispatch(db, primary_account())["failed"] == 1
+    assert drafted.calls == []

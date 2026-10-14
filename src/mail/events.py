@@ -223,9 +223,11 @@ def dispatch(db, account=None):
         query = query.filter(MailEvent.account == account.id)
     # Rules are read from the config on every call, so edits apply on the next run.
     actions = {**_ACTIONS, **rules.configured_actions()}
-    counts = {"events": 0, "done": 0, "skipped": 0, "failed": 0}
+    counts = {"events": 0, "done": 0, "skipped": 0, "failed": 0, "deferred": 0}
     # One attempt per mail and action and call, even if several of its events apply.
     attempted = set()
+    # Runs per capped kind of action (rules.per_run_limit) in this call.
+    started = {}
     for event in query.order_by(MailEvent.id).all():
         counts["events"] += 1
         settled = True
@@ -235,6 +237,15 @@ def dispatch(db, account=None):
             if (event.email_id, name) in attempted:
                 settled = False
                 continue
+            limit = rules.per_run_limit(name)
+            if limit is not None:
+                kind, maximum = limit
+                if started.get(kind, 0) >= maximum:
+                    # Over this run's cap: the event stays for the next run.
+                    counts["deferred"] += 1
+                    settled = False
+                    continue
+                started[kind] = started.get(kind, 0) + 1
             attempted.add((event.email_id, name))
             status = _run_once(db, event, name, run)
             if status in ("done", "skipped"):

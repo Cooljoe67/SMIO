@@ -145,7 +145,7 @@ def test_an_action_runs_once_per_event(db, actions):
     event = _stored_event(db)
     _stored_event(db, "read")
 
-    assert events.dispatch(db) == {"events": 2, "done": 1, "skipped": 0, "failed": 0}
+    assert events.dispatch(db) == {"events": 2, "done": 1, "skipped": 0, "failed": 0, "deferred": 0}
     assert events.dispatch(db)["events"] == 0
     assert runs == [event.event_key]
 
